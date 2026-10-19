@@ -204,6 +204,21 @@ impl Repo {
         Ok(parse_diff(&String::from_utf8_lossy(&out)))
     }
 
+    /// Diff between two commits.
+    pub fn range_diff(&self, from: &str, to: &str) -> Result<Vec<FileDiff>> {
+        let out = self.run([
+            "-c",
+            "core.quotepath=off",
+            "diff",
+            "--no-color",
+            "-M",
+            "--unified=3",
+            from,
+            to,
+        ])?;
+        Ok(parse_diff(&String::from_utf8_lossy(&out)))
+    }
+
     /// Diff of the working tree and index against `rev` (drafts before commit).
     pub fn worktree_diff(&self, rev: &str) -> Result<Vec<FileDiff>> {
         let out = self.run([
@@ -260,7 +275,7 @@ impl Repo {
 
     /// Commits a merge brought in from its other parents (empty otherwise).
     pub fn merged_commits(&self, sha: &str) -> Result<Vec<String>> {
-        let out = self.run(["rev-list", &format!("{sha}^1..{sha}")])?;
+        let out = self.run(["rev-list", "--reverse", &format!("{sha}^1..{sha}")])?;
         Ok(text(out)
             .lines()
             .filter(|l| !l.is_empty() && *l != sha)

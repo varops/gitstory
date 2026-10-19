@@ -37,6 +37,13 @@ pub struct WorkUnitMeta {
     /// Stories this work explicitly supersedes (`note --supersedes`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub supersedes: Vec<String>,
+    /// Last commit of the work, when it landed as a run of commits on main
+    /// (`land --since`); Git evidence stops here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<String>,
+    /// Session evidence counts only inside this time window (unix ms).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<(i64, i64)>,
     /// ghf traces this work unit holds against pruning until it lands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ghf_holds: Vec<String>,
@@ -112,6 +119,8 @@ impl WorkUnit {
                     landed: Vec::new(),
                     landed_at: None,
                     supersedes: Vec::new(),
+                    tip: None,
+                    window: None,
                     ghf_holds: Vec::new(),
                 };
                 fs::write(&meta_path, serde_json::to_vec_pretty(&m)?)?;

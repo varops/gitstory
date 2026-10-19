@@ -866,6 +866,67 @@ fn s15_git_is_untouched() {
     assert_eq!(before, snapshot(&r));
 }
 
+// Work pushed straight to main as several commits lands as one story.
+#[test]
+fn land_since_covers_a_run_of_commits() {
+    let r = Repo::new("since");
+    let base = r.git(&["rev-parse", "HEAD"]);
+    r.write("one.rs", "1\n");
+    let first = r.commit_all("Add one");
+    r.write("two.rs", "2\n");
+    r.commit_all("Add two");
+    r.ok(&[
+        "note",
+        "Split the work in two files because each loads separately",
+        "--work-unit",
+        "run",
+    ]);
+    let landed = r.ok(&[
+        "land",
+        "--work-unit",
+        "run",
+        "--since",
+        &base,
+        "--to",
+        "HEAD",
+    ]);
+    let s = &landed["story"];
+    assert_eq!(s["contains"][0], first.as_str(), "oldest first");
+    let hunks: Vec<&str> = landed["egress"]["calls"][0]["hunks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(hunks, ["one.rs", "two.rs"]);
+    // Blame on the first commit's file finds the story.
+    let bl = r.ok(&["blame", "one.rs"]);
+    assert_eq!(bl["stories"][0]["story"]["story_id"], s["story_id"]);
+    // Re-validation sees the same range.
+    let v = r.ok(&["validate", s["story_id"].as_str().unwrap()]);
+    assert_eq!(v["valid"], true, "{v}");
+    let calls = v["egress"]["calls"].as_array().unwrap();
+    let hunks: Vec<&str> = calls[0]["hunks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(hunks, ["one.rs", "two.rs"]);
+    assert_eq!(
+        r.err(&[
+            "land",
+            "--work-unit",
+            "run",
+            "--since",
+            "HEAD",
+            "--to",
+            &base
+        ]),
+        "E_USAGE"
+    );
+}
+
 #[test]
 fn land_requires_a_commit_on_main() {
     let r = Repo::new("main");

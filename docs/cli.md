@@ -126,9 +126,13 @@ Collects evidence from Git, Claude Code session logs and ghf (when enabled), bui
 
 Data: `{story, work_unit, new_events, events, egress}`.
 
-### `land [--work-unit W] [--to REV]`
+### `land [--work-unit W] [--to REV] [--since REV]`
 
 Run after the work merges. `--to` (default `HEAD`) must be reachable from the main branch. Landing collects the evidence once more and reconciles the drafts against the landed diff. A claim the landed code does not reflect becomes `rejected` or `discarded`. Landing then validates the story and writes it to the store, with the cited events and the egress manifest. Notes with `--supersedes` become links. Blame on the lines the commit changed proposes further links.
+
+`--since REV` lands work that went straight to main as several commits: the story covers `REV..TO`, and session evidence counts only between `REV`'s commit time and ten minutes after `TO`.
+
+Before synthesis, session evidence is narrowed to the task behind the change. The task starts with the last request before the first session edit to a changed file, and earlier session events are dropped. This applies to `draft` too.
 
 Data: `{story, proposals[], cited_events, egress}`.
 

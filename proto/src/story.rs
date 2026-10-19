@@ -64,8 +64,9 @@ pub struct Story {
     pub schema: String,
     pub repo: String,
     pub commit: String,
-    /// Other commits the landed commit brought in (a merge's branch
-    /// commits). Blame on any of them finds this story.
+    /// Other commits the landed commit brought in, oldest first: a merge's
+    /// branch commits, or the earlier commits of a run landed with
+    /// `land --since`. Blame on any of them finds this story.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub contains: Vec<String>,
     pub work_unit: String,

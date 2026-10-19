@@ -102,6 +102,10 @@ pub enum Command {
         /// The landed commit, reachable from the main branch.
         #[arg(long, default_value = "HEAD")]
         to: String,
+        /// The work landed as the commits after REV up to --to, pushed
+        /// straight to main.
+        #[arg(long)]
+        since: Option<String>,
     },
     /// Stories behind the lines of a file, following supersession forward.
     Blame {

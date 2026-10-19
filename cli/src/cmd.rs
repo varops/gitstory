@@ -159,6 +159,37 @@ pub fn trust(env: &Env, endpoint: Option<String>) -> Result<Out> {
 // ---------------------------------------------------------------------------
 // notes and collection
 
+/// Narrow session evidence to the task that produced the change: the last
+/// request before the first session edit to a changed path starts it.
+/// Earlier session events belong to other tasks in the same session.
+fn focus(mut events: Vec<EvidenceEvent>, changed: &BTreeSet<String>) -> Vec<EvidenceEvent> {
+    let session =
+        |e: &EvidenceEvent| e.durable.source == gitstory_proto::evidence::SourceType::AgentSession;
+    let Some(first_edit) = events
+        .iter()
+        .filter(|e| {
+            session(e)
+                && e.kind == EventType::Attempt
+                && e.paths.iter().any(|p| changed.contains(p))
+        })
+        .map(|e| e.durable.at)
+        .min()
+    else {
+        return events;
+    };
+    let Some(start) = events
+        .iter()
+        .filter(|e| session(e) && e.kind == EventType::Goal && e.durable.at <= first_edit)
+        .map(|e| e.durable.at)
+        .max()
+    else {
+        return events;
+    };
+    events.retain(|e| !session(e) || e.durable.at >= start);
+    // The request that started it is the goal; later ones are follow-ups.
+    events
+}
+
 fn work_unit_arg(ws: &Workspace, w: Option<String>) -> String {
     w.unwrap_or_else(|| collect::default_work_unit(ws))
 }
@@ -238,7 +269,6 @@ pub fn draft(env: &Env, work_unit: Option<String>, background: bool) -> Result<O
     }
     let mut wu = WorkUnit::open(&ws, &wu_id)?;
     let new = gather(&ws, &mut wu)?;
-    let events = wu.events()?;
     let head = ws
         .repo
         .head()
@@ -248,6 +278,11 @@ pub fn draft(env: &Env, work_unit: Option<String>, background: bool) -> Result<O
         Some(base) => ws.repo.worktree_diff(base)?,
         None => ws.repo.commit_diff(&head)?,
     };
+    let changed: BTreeSet<String> = diff
+        .iter()
+        .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
+        .collect();
+    let events = focus(wu.events()?, &changed);
     let mut gate = Gate::new(&ws.cfg.egress);
     let ignored = ignored_fn(&ws, &wu_id);
     let input = synth::Input {
@@ -315,7 +350,12 @@ fn spawn_background(ws: &Workspace, wu: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 // land
 
-pub fn land(env: &Env, work_unit: Option<String>, to: String) -> Result<Out> {
+pub fn land(
+    env: &Env,
+    work_unit: Option<String>,
+    to: String,
+    since: Option<String>,
+) -> Result<Out> {
     let ws = env.ws()?;
     let wu_id = work_unit_arg(&ws, work_unit);
     let sha = ws.require_commit(&to)?;
@@ -332,15 +372,33 @@ pub fn land(env: &Env, work_unit: Option<String>, to: String) -> Result<Out> {
         );
     }
     let mut wu = WorkUnit::open(&ws, &wu_id)?;
-    gather(&ws, &mut wu)?;
-    let events = wu.events()?;
-    let drafts = wu.drafts()?;
     let commit = ws.repo.commit(&sha)?;
-    let diff = ws.repo.commit_diff(&sha)?;
+    // A run of commits pushed straight to main lands as one story.
+    let since = match &since {
+        Some(r) => {
+            let base = ws.require_commit(r)?;
+            if base == sha || !ws.repo.is_ancestor(&base, &sha) {
+                fail!(Usage, "--since {r} must be an ancestor of {to}");
+            }
+            let start = ws.repo.commit(&base)?.time * 1000;
+            wu.meta.base_rev = Some(base.clone());
+            wu.meta.tip = Some(sha.clone());
+            wu.meta.window = Some((start, commit.time * 1000 + 10 * 60_000));
+            Some(base)
+        }
+        None => None,
+    };
+    gather(&ws, &mut wu)?;
+    let drafts = wu.drafts()?;
+    let diff = match &since {
+        Some(base) => ws.repo.range_diff(base, &sha)?,
+        None => ws.repo.commit_diff(&sha)?,
+    };
     let landed_paths: BTreeSet<String> = diff
         .iter()
         .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
         .collect();
+    let events = focus(wu.events()?, &landed_paths);
     let mut gate = Gate::new(&ws.cfg.egress);
     let ignored = ignored_fn(&ws, &wu_id);
     let input = synth::Input {
@@ -370,7 +428,15 @@ pub fn land(env: &Env, work_unit: Option<String>, to: String) -> Result<Out> {
         }
     };
     story.egress = egress_id;
-    story.contains = ws.repo.merged_commits(&sha)?;
+    story.contains = match &since {
+        Some(base) => ws
+            .repo
+            .commits_between(base, &sha)?
+            .into_iter()
+            .filter(|c| *c != sha)
+            .collect(),
+        None => ws.repo.merged_commits(&sha)?,
+    };
     // Only the evidence the story cites goes to the shared store.
     let cited: HashSet<&str> = story
         .claims()
@@ -404,7 +470,11 @@ pub fn land(env: &Env, work_unit: Option<String>, to: String) -> Result<Out> {
             proposal: None,
         })?;
     }
-    let proposals = propose_links(&ws, &story, &diff, &commit.parents)?;
+    let blame_base = match &since {
+        Some(base) => vec![base.clone()],
+        None => commit.parents.clone(),
+    };
+    let proposals = propose_links(&ws, &story, &diff, &blame_base)?;
     crate::ghf::release(&Ctx::new(&ws, &wu_id), &mut wu);
     wu.meta.landed.push((sha.clone(), story.story_id.clone()));
     wu.meta.landed_at = Some(id::now_ms());
@@ -753,7 +823,16 @@ pub fn validate(env: &Env, rev: String) -> Result<Out> {
             None => missing.push(e),
         }
     }
-    let diff = ws.repo.commit_diff(&s.commit).unwrap_or_default();
+    // A story landed as a run of commits covers their whole range.
+    let single_parent = ws
+        .repo
+        .commit(&s.commit)
+        .is_ok_and(|c| c.parents.len() == 1);
+    let diff = match s.contains.first() {
+        Some(oldest) if single_parent => ws.repo.range_diff(&format!("{oldest}^"), &s.commit),
+        _ => ws.repo.commit_diff(&s.commit),
+    }
+    .unwrap_or_default();
     let ignored = ignored_fn(&ws, &s.work_unit);
     let mut gate = Gate::new(&ws.cfg.egress);
     let checked = synth::validate(&ws.cfg, &mut gate, s.clone(), &events, &diff, &ignored)?;

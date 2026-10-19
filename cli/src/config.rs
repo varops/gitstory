@@ -284,9 +284,6 @@ impl RepoConfig {
             if m.provider == "command" && m.command.is_none() {
                 fail!(Config, "model.command is required for the command provider");
             }
-            if m.provider == "openai" && m.url.is_none() {
-                fail!(Config, "model.url is required for the openai provider");
-            }
         }
         if ghf_like_duration(&self.drafts.expire).is_none() {
             fail!(Config, "drafts.expire must be a duration such as 30d");

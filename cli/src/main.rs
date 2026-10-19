@@ -103,7 +103,11 @@ fn dispatch(env: &Env, cli: Cli) -> Result<Out> {
             work_unit,
             background,
         } => cmd::draft(env, work_unit, background),
-        Command::Land { work_unit, to } => cmd::land(env, work_unit, to),
+        Command::Land {
+            work_unit,
+            to,
+            since,
+        } => cmd::land(env, work_unit, to, since),
         Command::Blame { target } => cmd::blame(env, target),
         Command::Path { path } => cmd::path(env, path),
         Command::History { story } => cmd::history(env, story),

@@ -174,9 +174,14 @@ pub fn git(ctx: &Ctx, wu: &WorkUnit) -> Result<Vec<EvidenceEvent>> {
     // the current branch from elsewhere are not attributed to this work.
     let tip = wu
         .meta
-        .branch
-        .as_deref()
-        .and_then(|b| repo.resolve_commit(&format!("refs/heads/{b}")))
+        .tip
+        .clone()
+        .or_else(|| {
+            wu.meta
+                .branch
+                .as_deref()
+                .and_then(|b| repo.resolve_commit(&format!("refs/heads/{b}")))
+        })
         .or_else(|| repo.head());
     let Some(head) = tip else {
         return Ok(Vec::new());
@@ -445,7 +450,11 @@ pub fn claude_code(ctx: &Ctx, wu: &mut WorkUnit) -> Result<Vec<EvidenceEvent>> {
             }
             // Stay inside the work unit: its branch, and after it started.
             let at = parse_time(d.get("timestamp").and_then(Value::as_str));
-            if at < wu.meta.created_at - 6 * 3_600_000 {
+            let inside = match wu.meta.window {
+                Some((start, end)) => at >= start && at <= end,
+                None => at >= wu.meta.created_at - 6 * 3_600_000,
+            };
+            if !inside {
                 continue;
             }
             if let (Some(b), Some(lb)) =
@@ -465,15 +474,28 @@ pub fn claude_code(ctx: &Ctx, wu: &mut WorkUnit) -> Result<Vec<EvidenceEvent>> {
             };
             let content = msg.get("content").cloned().unwrap_or(Value::Null);
             if typ == "user" {
-                // The first human prompt states the goal.
-                if !goal_seen && let Value::String(s) = &content {
+                // Human prompts state what was asked. Meta lines, command
+                // echoes and compaction summaries are not prompts.
+                let meta = ["isMeta", "isCompactSummary", "isVisibleInTranscriptOnly"]
+                    .iter()
+                    .any(|k| d.get(*k).and_then(Value::as_bool).unwrap_or(false));
+                if let Value::String(s) = &content
+                    && !meta
+                    && !s.trim_start().starts_with('<')
+                    && !s.trim().is_empty()
+                {
+                    let fact = if goal_seen {
+                        "user request"
+                    } else {
+                        "task as the user asked for it"
+                    };
                     goal_seen = true;
                     out.push(ctx.event(
                         EventType::Goal,
                         SourceType::AgentSession,
                         "user",
                         at,
-                        "task as the user asked for it",
+                        fact,
                         Some(s),
                         line.as_bytes(),
                         pointer.clone(),
