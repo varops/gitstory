@@ -21,7 +21,9 @@
       <a class="brand" href="#top" aria-label="GitStory home"><img src="favicon.svg" alt="" width="22" height="22"><span>GitStory</span></a>
       <nav aria-label="Primary">
         <a href="#problem">Why</a>
+        <a href="#versus">Example</a>
         <a href="#how">How it works</a>
+        <a href="#ghf">ghf</a>
         <a href="#trust">Trust</a>
         <a href="#agents">For agents</a>
         <a href="#start">Quick start</a>
@@ -35,7 +37,7 @@
     <section class="hero wrap">
       <p class="preview"><span class="dot" aria-hidden="true"></span>Private preview · pre-release · October 2026</p>
       <p class="eyebrow">Engineering memory for Git commits</p>
-      <h1>Know why the code is the way it is.<br><span class="hl">Before you change it.</span></h1>
+      <h1>Know why the code is the way it is. <span class="hl">Before you change it.</span></h1>
       <p class="lead"><strong>GitStory</strong> keeps the reasons behind landed code. It collects evidence while the
         work happens (agent sessions, tests, notes and Git) and distills it into a short story: the decisions, the
         approaches that were rejected, and the questions nobody answered. Every claim is cited and checked against the
@@ -132,8 +134,39 @@
       </div>
     </section>
 
+    <section class="wrap" id="versus">
+      <p class="kicker">02 · With and without</p>
+      <h2 class="section">Six weeks later, an agent is asked to simplify the retry loop.</h2>
+      <p class="wide">An illustrative example. The code is the one in the figure above. Charges sometimes take three
+        attempts, and the task is to clean up <code>billing/retry.py</code>.</p>
+      <div class="versus">
+        <article class="without">
+          <h3><span class="vs-tag">Without GitStory</span></h3>
+          <ol>
+            <li>Reads the file and <code>git log</code>: <em>"Use an idempotency key across charge retries
+                (#12)"</em>. Nothing says why the key must be shared.</li>
+            <li>Moves key creation into the loop so each attempt starts clean, or adds a Redis lock around
+              <code>charge()</code>. That lock was already tried and dropped.</li>
+            <li>The tests pass: none of them covers a timeout after the provider already charged.</li>
+            <li>Double charges come back in production.</li>
+          </ol>
+        </article>
+        <article class="with">
+          <h3><span class="vs-tag">With GitStory</span></h3>
+          <ol>
+            <li>Runs <code>git story blame billing/retry.py:5-10 --brief</code> before editing.</li>
+            <li>Learns the decision: one key for every attempt, because the provider deduplicates on it.</li>
+            <li>Sees the rejected Redis lock and why it fails, so it doesn't try it again. The open question about the
+              provider's retention window goes to a human instead of a guess.</li>
+            <li>Simplifies the loop, keeps the key shared, and records its own reason with <code>git story
+                note</code>.</li>
+          </ol>
+        </article>
+      </div>
+    </section>
+
     <section class="wrap" id="how">
-      <p class="kicker">02 · How GitStory works</p>
+      <p class="kicker">03 · How GitStory works</p>
       <h2 class="section">Evidence while you work.<br>A story when it lands.</h2>
       <div class="split" aria-label="Where GitStory fits">
         <div>
@@ -199,6 +232,51 @@ st_01m5b  2870d7da  Remove the lock [superseded]</span>
           <p>Versioning missed cross-row writes. Explicitly supersedes B.</p>
         </li>
       </ol>
+    </section>
+
+    <section class="wrap" id="ghf">
+      <p class="kicker">Better with ghf</p>
+      <h2 class="section">ghf keeps what was tried.<br>GitStory keeps why it landed.</h2>
+      <p class="wide"><a href="https://ghf.sh">ghf</a> is GitStory's sibling: high-frequency source control for AI agents.
+        It saves the worktree after every agent edit, so any checkpoint can be restored, diffed or forked. The two
+        answer different questions and keep their data for different lengths of time.</p>
+      <div class="split" aria-label="ghf and GitStory compared">
+        <div>
+          <h3>ghf</h3>
+          <p><strong>What state was the code in, and can I get back to it?</strong> Every edit is a checkpoint. Traces
+            are pruned 30 days after the work lands.</p>
+        </div>
+        <div class="accent">
+          <h3>GitStory</h3>
+          <p><strong>Why is the code this way?</strong> A few cited decisions per change, bound to the landed commit,
+            kept as long as the code matters.</p>
+        </div>
+        <div>
+          <h3>Git</h3>
+          <p><strong>What changed?</strong> Commits and diffs, untouched by either tool.</p>
+        </div>
+      </div>
+      <div class="grid two feat">
+        <article>
+          <h3><span class="ico" aria-hidden="true">↳</span>Checkpoints become evidence</h3>
+          <p>GitStory reads ghf traces through ghf's public CLI. It cites the attempts, and each checkpoint's
+            <code>tests=pass</code> or <code>tests=fail</code> annotation.</p>
+        </article>
+        <article>
+          <h3><span class="ico" aria-hidden="true">■</span>Holds until the story lands</h3>
+          <p>GitStory places a hold on each trace it reads, so ghf won't prune it while the work is open. It releases
+            the hold once the story lands.</p>
+        </article>
+        <article>
+          <h3><span class="ico" aria-hidden="true">✓</span>Stories outlive traces</h3>
+          <p>A story keeps the durable part of every event it cites. After ghf prunes the trace, the story still
+            validates.</p>
+        </article>
+        <article>
+          <h3><span class="ico" aria-hidden="true">∅</span>Independent by design</h3>
+          <p>Neither needs the other. ghf doesn't know GitStory exists, and GitStory works with plain Git.</p>
+        </article>
+      </div>
     </section>
 
     <section class="wrap" id="trust">
