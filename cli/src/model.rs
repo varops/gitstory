@@ -61,7 +61,10 @@ pub fn endpoint(m: &ModelConfig) -> (String, bool) {
             (url, local)
         }
         "openai" => {
-            let url = m.url.clone().unwrap_or_default();
+            let url = m
+                .url
+                .clone()
+                .unwrap_or_else(|| "https://api.openai.com/v1".into());
             let local = is_loopback(&url);
             (url, local)
         }
@@ -213,15 +216,22 @@ fn anthropic(m: &ModelConfig, url: &str, req: &Request) -> Result<Value> {
 }
 
 fn openai(m: &ModelConfig, url: &str, req: &Request) -> Result<Value> {
-    let body = json!({
+    let hosted = url.contains("api.openai.com");
+    let mut body = json!({
         "model": m.name,
         "messages": [
-            {"role": "system", "content": format!("{}\n\nAnswer with one JSON object matching this JSON schema:\n{}", req.system, req.schema)},
+            {"role": "system", "content": req.system},
             {"role": "user", "content": req.user},
         ],
-        "response_format": {"type": "json_object"},
-        "max_tokens": req.max_tokens,
+        "response_format": {
+            "type": "json_schema",
+            "json_schema": {"name": "gitstory", "strict": true, "schema": req.schema},
+        },
+        "max_completion_tokens": req.max_tokens,
     });
+    if hosted {
+        body["reasoning_effort"] = json!(m.effort);
+    }
     let mut r = agent()
         .post(format!("{}/chat/completions", url.trim_end_matches('/')))
         .header("content-type", "application/json");
@@ -229,6 +239,8 @@ fn openai(m: &ModelConfig, url: &str, req: &Request) -> Result<Value> {
         && !key.is_empty()
     {
         r = r.header("authorization", &format!("Bearer {key}"));
+    } else if hosted {
+        fail!(Auth, "set OPENAI_API_KEY for {url}");
     }
     let mut resp = r
         .send_json(&body)
@@ -237,15 +249,25 @@ fn openai(m: &ModelConfig, url: &str, req: &Request) -> Result<Value> {
     let v: Value = resp
         .body_mut()
         .read_json()
-        .map_err(|e| err!(Remote, "bad response from {url}: {e}"))?;
-    if !(200..300).contains(&status) {
-        fail!(Remote, "{url} returned HTTP {status}");
+        .map_err(|e| err!(Remote, "bad response from {url} (HTTP {status}): {e}"))?;
+    let detail = v["error"]["message"].as_str().unwrap_or_default();
+    if status == 401 || status == 403 {
+        fail!(
+            Auth,
+            "{url} rejected the credentials (HTTP {status}): {detail}"
+        );
     }
-    parse_json(
-        v["choices"][0]["message"]["content"]
-            .as_str()
-            .unwrap_or_default(),
-    )
+    if !(200..300).contains(&status) {
+        fail!(Remote, "{url} returned HTTP {status}: {detail}");
+    }
+    let choice = &v["choices"][0];
+    if let Some(refusal) = choice["message"]["refusal"].as_str() {
+        fail!(ModelRefused, "the model declined the request: {refusal}");
+    }
+    if choice["finish_reason"] == "length" {
+        fail!(SynthesisInvalid, "the model ran out of output tokens");
+    }
+    parse_json(choice["message"]["content"].as_str().unwrap_or_default())
 }
 
 /// Run a program: request JSON on stdin, answer JSON on stdout.

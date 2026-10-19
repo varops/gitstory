@@ -263,7 +263,7 @@ pub fn draft(env: &Env, work_unit: Option<String>, background: bool) -> Result<O
     };
     let egress_id = id::new_id(id::EGRESS);
     let result = synth::synthesize(&ws.cfg, &mut gate, &input, &ignored)
-        .and_then(|s| synth::validate(&ws.cfg, &mut gate, s, &events));
+        .and_then(|s| synth::validate(&ws.cfg, &mut gate, s, &events, &diff, &ignored));
     // The manifest is kept even when the request failed: data may have left.
     let manifest = EgressManifest {
         id: egress_id.clone(),
@@ -357,7 +357,7 @@ pub fn land(env: &Env, work_unit: Option<String>, to: String) -> Result<Out> {
     let egress_id = id::new_id(id::EGRESS);
     let result = synth::synthesize(&ws.cfg, &mut gate, &input, &ignored)
         .map(|s| synth::guard_landed(s, &events, &landed_paths))
-        .and_then(|s| synth::validate(&ws.cfg, &mut gate, s, &events));
+        .and_then(|s| synth::validate(&ws.cfg, &mut gate, s, &events, &diff, &ignored));
     let manifest = EgressManifest {
         id: egress_id.clone(),
         calls: gate.calls,
@@ -753,8 +753,10 @@ pub fn validate(env: &Env, rev: String) -> Result<Out> {
             None => missing.push(e),
         }
     }
+    let diff = ws.repo.commit_diff(&s.commit).unwrap_or_default();
+    let ignored = ignored_fn(&ws, &s.work_unit);
     let mut gate = Gate::new(&ws.cfg.egress);
-    let checked = synth::validate(&ws.cfg, &mut gate, s.clone(), &events)?;
+    let checked = synth::validate(&ws.cfg, &mut gate, s.clone(), &events, &diff, &ignored)?;
     let manifest = EgressManifest {
         id: id::new_id(id::EGRESS),
         calls: gate.calls,

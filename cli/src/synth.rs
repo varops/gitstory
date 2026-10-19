@@ -51,7 +51,7 @@ Rules:
 - "goal": the task's purpose, status "none".
 - "unknowns": questions the evidence does not answer, especially the reason behind the main change when nobody stated it. Never invent intent.
 - "paths": repository paths the decisions are about.
-- "summary": one sentence saying what changed and why, using only supported facts.
+- "summary": one plain sentence saying what changed and why, using only supported facts. No evidence ids in the summary.
 - Be concise: short claims, no filler. Quote numbers exactly as the evidence gives them."#;
 
 const LAND: &str = r#"
@@ -66,7 +66,8 @@ const VALIDATE: &str = r#"You check claims against evidence. For each claim you 
 - "yes": the evidence alone supports the claim as written.
 - "partly": plausible, but the evidence does not establish it.
 - "no": unsupported or contradicted.
-Judge only from the evidence given. Do not use outside knowledge."#;
+You also get the diff of the commit the story describes. It is evidence for claims about what the code does, when the claim cites a commit or edit event.
+Judge only from the evidence and diff given. Do not use outside knowledge."#;
 
 fn claim_schema() -> Value {
     json!({
@@ -412,7 +413,7 @@ pub fn synthesize(
             status: StoryStatus::Current,
             supersedes: input.supersedes.clone(),
             related: Vec::new(),
-            summary: scrub::scrub(v["summary"].as_str().unwrap_or_default().trim()).0,
+            summary: strip_ids(&scrub::scrub(v["summary"].as_str().unwrap_or_default()).0),
             goal,
             decisions: claims(&v["decisions"]),
             rejected: claims(&v["rejected"]),
@@ -435,6 +436,15 @@ pub fn synthesize(
         return Ok(normalize(story, input.events));
     }
     Err(last.unwrap_or_else(|| err!(SynthesisInvalid, "synthesis failed")))
+}
+
+/// Evidence ids belong in claims, not in prose.
+fn strip_ids(s: &str) -> String {
+    use std::sync::LazyLock;
+    static IDS: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r"\s*[\[(](?:\s*,?\s*ev_[0-9a-z]+)+\s*[\])]").expect("valid regex")
+    });
+    IDS.replace_all(s, "").trim().to_owned()
 }
 
 fn clone_sent(s: &Sent) -> Sent {
@@ -495,6 +505,8 @@ pub fn validate(
     gate: &mut Gate,
     mut s: Story,
     events: &[EvidenceEvent],
+    diff: &[FileDiff],
+    ignored: &dyn Fn(&str) -> bool,
 ) -> Result<Story> {
     let by_id: HashMap<&str, &EvidenceEvent> = events.iter().map(|e| (e.id.as_str(), e)).collect();
     let excerpts = cfg.egress.send_excerpts && cfg.collection.excerpts == "on";
@@ -532,16 +544,21 @@ pub fn validate(
     }
     let validation_model = cfg.validation_model();
     if !items.is_empty() && validation_model.provider != "none" {
+        // The commit's diff is durable too: it lives in Git. It is what
+        // proves claims about what the code does.
+        let (bundle, gated) = gated_bundle(cfg, &[], diff, ignored);
         let req = Request {
             system: VALIDATE.into(),
-            user: serde_json::to_string_pretty(&json!({"claims": prompt_items}))?,
+            user: serde_json::to_string_pretty(
+                &json!({"claims": prompt_items, "diff": bundle["diff"]}),
+            )?,
             schema: verdict_schema(),
             max_tokens: 8_000,
         };
         let sent = Sent {
             purpose: "validation",
             event_ids: cited.into_iter().collect(),
-            hunks: Vec::new(),
+            hunks: gated.hunks,
             excerpts,
         };
         let v = gate.call(validation_model, &req, sent)?;
@@ -683,6 +700,15 @@ mod tests {
             test_check(&claim("50/50 passed", &["ev_1"]), &by_id),
             Some(false)
         );
+    }
+
+    #[test]
+    fn summaries_lose_evidence_ids() {
+        assert_eq!(
+            strip_ids("Reuse one key [ev_01ab, ev_02cd]."),
+            "Reuse one key."
+        );
+        assert_eq!(strip_ids("Reuse one key (ev_01ab)"), "Reuse one key");
     }
 
     #[test]

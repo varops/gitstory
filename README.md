@@ -15,7 +15,7 @@ GitStory keeps the "why" behind landed code. It collects evidence from agent ses
 
 ## Status
 
-M1 from the [plan](docs/plan-m1.md) is built, along with the landing, link and shared-store work the PRD puts in M2 and M3. All 15 PRD acceptance scenarios pass against a stand-in model. They have not run against a real model yet. Next comes the M0 quality study: real Claude Code sessions, and auditors rating the stories.
+M1 from the [plan](docs/plan-m1.md) is built, along with the landing, link and shared-store work the PRD puts in M2 and M3. All 15 PRD acceptance scenarios pass against a stand-in model. A first end-to-end run against OpenAI `gpt-6-luna` (draft, squash-merge landing, blame, re-validation) works. The Anthropic provider has not been called live yet. Next comes the M0 quality study: real Claude Code sessions, and auditors rating the stories.
 
 Built:
 - **Collection:** notes, test results, Git, Claude Code session logs, and ghf traces through ghf's public CLI.

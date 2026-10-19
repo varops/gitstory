@@ -152,7 +152,7 @@ Full-text search over summaries, claims, goals and paths. Terms are combined wit
 
 ### `validate [REV|STORY]`
 
-Re-checks a landed story using only what the store holds: the durable parts of the events it cites. Session logs, CI links and ghf traces may be gone. Nothing is changed; any model call is recorded in a new egress manifest.
+Re-checks a landed story using only durable evidence: the durable parts of the events it cites, and the commit's diff from Git. Session logs, CI links and ghf traces may be gone. Nothing is changed; any model call is recorded in a new egress manifest.
 
 Data: `{story, valid, unsupported[], missing_events[], egress}`.
 
@@ -227,7 +227,7 @@ send_excerpts = true
 [model]
 provider = "anthropic"           # anthropic | openai | command
 name = "claude-opus-5-5"
-# url = "…"                      # anthropic/openai endpoint
+# url = "…"                      # default https://api.anthropic.com or https://api.openai.com/v1
 # command = "…"                  # command: JSON request on stdin, JSON on stdout
 local = false                    # command: does it stay on this machine?
 effort = "high"
@@ -246,7 +246,7 @@ expire = "30d"
 | Variable | Effect |
 |---|---|
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN` | Anthropic credentials |
-| `OPENAI_API_KEY` | Credentials for an OpenAI-compatible endpoint |
+| `OPENAI_API_KEY` | Credentials for OpenAI or an OpenAI-compatible endpoint |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | S3 store credentials |
 | `GITSTORY_WORK_UNIT` | Default work unit |
 | `GITSTORY_AUTHOR` | Author of notes, links and edits (default: Git `user.name`) |
