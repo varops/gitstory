@@ -11,6 +11,8 @@
 mod envelope;
 mod error;
 pub mod evidence;
+pub mod id;
+pub mod record;
 pub mod story;
 
 pub use envelope::{ErrorBody, Response, SCHEMA_VERSION};

@@ -1,8 +1,10 @@
-//! Command grammar. Mirrors the illustrative CLI in PRD §10; not final.
+//! Command grammar (PRD §10).
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+
+use crate::hooks::{Harness, Scope};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -52,7 +54,21 @@ pub enum Format {
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Write a .gitstory file: store location, collection and egress policy.
-    Init,
+    Init {
+        /// Repository id in the store (default: from the origin remote).
+        #[arg(long)]
+        repository: Option<String>,
+        /// Trust the configured model endpoint now.
+        #[arg(long)]
+        trust: bool,
+        /// Overwrite an existing .gitstory.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Trust a model endpoint (default: the configured ones).
+    Trust { endpoint: Option<String> },
+    /// Show the story for a commit or story id.
+    Show { rev: Option<String> },
     /// Record a decision, reason or constraint, or a test result.
     Note {
         /// What was decided and why.
@@ -67,17 +83,24 @@ pub enum Command {
         test: Option<String>,
         #[arg(long, value_enum, requires = "test")]
         result: Option<TestResult>,
-    },
-    /// Draft a story from the evidence collected so far.
-    Draft {
         #[arg(long)]
         work_unit: Option<String>,
     },
-    /// Reconcile a work unit's drafts against the commit that landed.
+    /// Draft a story from the evidence collected so far. Drafts stay local.
+    Draft {
+        #[arg(long)]
+        work_unit: Option<String>,
+        /// Return at once and draft in a detached process (for hooks).
+        #[arg(long)]
+        background: bool,
+    },
+    /// Reconcile a work unit's drafts against the commit that landed, and
+    /// write the story to the shared store.
     Land {
         #[arg(long)]
-        work_unit: String,
-        #[arg(long)]
+        work_unit: Option<String>,
+        /// The landed commit, reachable from the main branch.
+        #[arg(long, default_value = "HEAD")]
         to: String,
     },
     /// Stories behind the lines of a file, following supersession forward.
@@ -91,29 +114,85 @@ pub enum Command {
     History { story: String },
     /// Full-text search over summaries, claims, goals and paths.
     Search { query: String },
+    /// Re-check a landed story's claims against its stored evidence only.
+    Validate {
+        #[arg(default_value = "HEAD")]
+        rev: String,
+    },
     /// Link stories, or accept or reject a proposed link.
     Link {
         story: Option<String>,
-        #[arg(long)]
+        #[arg(long, conflicts_with = "related")]
         supersedes: Option<String>,
         #[arg(long)]
         related: Option<String>,
+        /// Remove the link instead of adding it.
+        #[arg(long)]
+        remove: bool,
         #[arg(long, conflicts_with_all = ["story", "reject"])]
         accept: Option<String>,
         #[arg(long, conflicts_with_all = ["story", "accept"])]
         reject: Option<String>,
     },
-    /// Edit a story; the change is versioned and becomes stated evidence.
-    Edit { rev: String },
+    /// Open link proposals.
+    Proposals,
+    /// Edit a landed story; the change is versioned and becomes stated evidence.
+    Edit {
+        /// Commit or story id.
+        #[arg(default_value = "HEAD")]
+        rev: String,
+        /// The story, when the commit has several.
+        #[arg(long)]
+        story: Option<String>,
+        #[arg(long)]
+        summary: Option<String>,
+        /// Add a stated decision.
+        #[arg(long = "add-decision")]
+        add_decision: Vec<String>,
+        #[arg(long = "add-unknown")]
+        add_unknown: Vec<String>,
+        /// Promote hypothesis N (0-based) to a stated decision.
+        #[arg(long)]
+        promote: Vec<usize>,
+        /// Demote decision N (0-based) to a hypothesis.
+        #[arg(long)]
+        demote: Vec<usize>,
+        /// reviewed, flagged or unreviewed.
+        #[arg(long)]
+        review: Option<String>,
+    },
     /// Export stories with their durable evidence, links and egress manifests.
     Export {
-        #[arg(long, value_enum)]
+        #[arg(long, value_enum, default_value = "json")]
         format: Format,
         #[arg(long)]
         out: Option<PathBuf>,
     },
     /// Import an export into this store.
     Import { dir: PathBuf },
+    /// Work units, drafts, store and egress policy.
+    Status,
+    /// Remove local collection for landed and expired work units.
+    Gc {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Install, remove or inspect background drafting hooks.
+    Hooks {
+        #[arg(value_parser = ["install", "uninstall", "status"])]
+        action: String,
+        #[arg(value_enum)]
+        harness: Harness,
+        #[arg(long, value_enum, default_value = "project")]
+        scope: Scope,
+    },
+    /// Install or print the agent skill.
+    Skill {
+        #[arg(value_parser = ["install", "show"])]
+        action: String,
+        #[arg(long, value_enum, default_value = "project")]
+        scope: Scope,
+    },
 }
 
 impl Cli {
@@ -122,7 +201,9 @@ impl Cli {
         match &self.command {
             None => "show",
             Some(c) => match c {
-                Command::Init => "init",
+                Command::Init { .. } => "init",
+                Command::Trust { .. } => "trust",
+                Command::Show { .. } => "show",
                 Command::Note { .. } => "note",
                 Command::Draft { .. } => "draft",
                 Command::Land { .. } => "land",
@@ -130,10 +211,16 @@ impl Cli {
                 Command::Path { .. } => "path",
                 Command::History { .. } => "history",
                 Command::Search { .. } => "search",
+                Command::Validate { .. } => "validate",
                 Command::Link { .. } => "link",
+                Command::Proposals => "proposals",
                 Command::Edit { .. } => "edit",
                 Command::Export { .. } => "export",
                 Command::Import { .. } => "import",
+                Command::Status => "status",
+                Command::Gc { .. } => "gc",
+                Command::Hooks { .. } => "hooks",
+                Command::Skill { .. } => "skill",
             },
         }
     }

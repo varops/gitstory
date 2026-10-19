@@ -42,6 +42,16 @@ pub enum StoryStatus {
     Superseded,
 }
 
+/// A draft describes work in progress; a landed story has been reconciled
+/// against the commit that landed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    Draft,
+    #[default]
+    Landed,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Review {
     /// `unreviewed`, `reviewed` or `flagged`.
@@ -54,7 +64,19 @@ pub struct Story {
     pub schema: String,
     pub repo: String,
     pub commit: String,
+    /// Other commits the landed commit brought in (a merge's branch
+    /// commits). Blame on any of them finds this story.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contains: Vec<String>,
     pub work_unit: String,
+    #[serde(default)]
+    pub stage: Stage,
+    /// Edit version, starting at 1. Every edit keeps the previous version.
+    #[serde(default = "one")]
+    pub version: u32,
+    /// Unix milliseconds.
+    #[serde(default)]
+    pub created_at: i64,
     /// Derived from accepted links, never guessed (PRD §8.9).
     pub status: StoryStatus,
     #[serde(default)]
@@ -89,7 +111,26 @@ pub struct Story {
     pub egress: String,
 }
 
+fn one() -> u32 {
+    1
+}
+
 impl Story {
+    /// Every claim in the story, with the section it sits in.
+    pub fn claims(&self) -> Vec<(&'static str, &Claim)> {
+        let mut v = vec![("goal", &self.goal)];
+        for (name, list) in [
+            ("decisions", &self.decisions),
+            ("rejected", &self.rejected),
+            ("discarded", &self.discarded),
+            ("evidence_summary", &self.evidence_summary),
+            ("hypotheses", &self.hypotheses),
+        ] {
+            v.extend(list.iter().map(|c| (name, c)));
+        }
+        v
+    }
+
     /// Structural invariants that hold for every stored story (PRD §8.3,
     /// §8.5, §8.6). Returns the violations found.
     pub fn violations(&self) -> Vec<String> {

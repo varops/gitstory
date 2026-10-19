@@ -41,8 +41,32 @@ error_codes! {
     NotInitialized = "E_NOT_INITIALIZED" => Usage,
     /// `.gitstory` or user configuration is invalid.
     Config = "E_CONFIG" => Usage,
+    /// A reference prefix matches more than one item.
+    Ambiguous = "E_AMBIGUOUS" => Usage,
     /// No story, evidence event or commit matches the reference.
     NotFound = "E_NOT_FOUND" => NotFound,
+    /// The commit does not exist locally.
+    CommitNotFound = "E_COMMIT_NOT_FOUND" => NotFound,
+    /// The commit is not reachable from the configured main ref.
+    CommitNotReachable = "E_COMMIT_NOT_REACHABLE" => Refused,
+    /// The work unit has no evidence to build a story from.
+    NoEvidence = "E_NO_EVIDENCE" => Refused,
+    /// The egress policy forbids this request (for example, inference = local).
+    EgressDenied = "E_EGRESS_DENIED" => Refused,
+    /// The link would create a supersession cycle.
+    LinkCycle = "E_LINK_CYCLE" => Refused,
+    /// Import target already holds different data.
+    StoreConflict = "E_STORE_CONFLICT" => Conflict,
+    /// The model endpoint is not trusted on this machine. Run `git story trust`.
+    UntrustedEndpoint = "E_UNTRUSTED_ENDPOINT" => Remote,
+    /// Missing or rejected credentials.
+    Auth = "E_AUTH" => Remote,
+    /// The model or a remote store failed or could not be reached.
+    Remote = "E_REMOTE" => Remote,
+    /// The model declined the request (`stop_reason: refusal`).
+    ModelRefused = "E_MODEL_REFUSED" => Remote,
+    /// The model's output did not match `gitstory/v1` after retries.
+    SynthesisInvalid = "E_SYNTHESIS_INVALID" => Internal,
     /// Command exists in the grammar but is not built yet.
     NotImplemented = "E_NOT_IMPLEMENTED" => NotImplemented,
 }
