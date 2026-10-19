@@ -1,0 +1,334 @@
+<!doctype html>
+<html lang="en">
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GitStory — engineering memory for Git commits</title>
+  <meta name="description" content="GitStory keeps the reasons behind landed code. It turns agent sessions, tests, notes and Git into short, cited stories bound to the commits that landed, so agents and people can ask why code is the way it is before they change it.">
+  <meta property="og:title" content="GitStory — engineering memory for Git commits">
+  <meta property="og:description" content="Why the code is the way it is: cited decisions, rejected approaches and open questions, bound to landed commits.">
+  <meta property="og:type" content="website">
+  <meta name="theme-color" content="#b45309">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+  <a class="skip" href="#top">Skip to content</a>
+  <header class="nav">
+    <div class="wrap nav-inner">
+      <a class="brand" href="#top" aria-label="GitStory home"><img src="favicon.svg" alt="" width="22" height="22"><span>GitStory</span></a>
+      <nav aria-label="Primary">
+        <a href="#problem">Why</a>
+        <a href="#how">How it works</a>
+        <a href="#trust">Trust</a>
+        <a href="#agents">For agents</a>
+        <a href="#start">Quick start</a>
+        <a href="https://github.com/varops/gitstory/blob/main/docs/cli.md">Docs</a>
+        <a class="gh" href="https://github.com/varops/gitstory">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero wrap">
+      <p class="preview"><span class="dot" aria-hidden="true"></span>Private preview · pre-release · October 2026</p>
+      <p class="eyebrow">Engineering memory for Git commits</p>
+      <h1>Know why the code is the way it is.<br><span class="hl">Before you change it.</span></h1>
+      <p class="lead"><strong>GitStory</strong> keeps the reasons behind landed code. It collects evidence while the
+        work happens (agent sessions, tests, notes and Git) and distills it into a short story: the decisions, the
+        approaches that were rejected, and the questions nobody answered. Every claim is cited and checked against the
+        code that actually landed.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/varops/gitstory">View GitStory on GitHub</a>
+        <a class="btn" href="https://github.com/varops/gitstory/blob/main/docs/cli.md">Read the CLI reference</a>
+      </div>
+      <ul class="facts" aria-label="Project facts">
+        <li>Rust</li>
+        <li>Claude Code sessions, Git, notes and ghf</li>
+        <li>Anthropic, OpenAI or a local model</li>
+        <li>Nothing written into Git</li>
+      </ul>
+
+      <figure class="storyfig" aria-labelledby="fig-cap">
+        <div class="fig-stack">
+          <pre class="code" aria-label="billing/retry.py with lines 6 to 10 highlighted"><code><span class="l"><span class="ln">1</span><span class="kw">import</span> time</span><span class="l"><span class="ln">2</span><span class="kw">import</span> uuid</span><span class="l"><span class="ln">3</span></span><span class="l"><span class="ln">4</span><span class="kw">def</span> charge(client, order):</span><span class="l hit"><span class="ln">5</span>    <span class="cm"># One key for every attempt</span></span><span class="l hit"><span class="ln">6</span>    key = str(uuid.uuid4())</span><span class="l hit"><span class="ln">7</span>    <span class="kw">for</span> attempt <span class="kw">in</span> range(3):</span><span class="l hit"><span class="ln">8</span>        <span class="kw">try</span>:</span><span class="l hit"><span class="ln">9</span>            <span class="kw">return</span> client.charge(</span><span class="l hit"><span class="ln">10</span>                order.id, idempotency_key=key)</span></code></pre>
+          <pre class="term" aria-label="Example terminal session"><code><span class="p">$</span> git story blame billing/retry.py:5-10 --brief
+<span class="ok">st_01m5aa3y  0e841b8f  Reuse one idempotency key across charge retries</span></code></pre>
+        </div>
+        <article class="story" aria-label="Example story">
+          <div class="story-head"><span class="badge">current</span><span>st_01m5aa3y</span><span>·</span><span>commit 0e841b8f</span><span>·</span><span>landed</span></div>
+          <h3>The charge retry loop reuses one idempotency key across attempts, so a retry after a timeout cannot charge
+            twice.</h3>
+          <div class="dec">
+            <h4>Decisions</h4>
+            <ul>
+              <li>Generate one key before the retry loop and pass it to every attempt.<span class="cite">observed ·
+                  diff</span></li>
+              <li>Reuse the key because the provider deduplicates on it.<span class="cite">stated · note</span></li>
+            </ul>
+          </div>
+          <div class="rej">
+            <h4>Rejected</h4>
+            <ul>
+              <li>A Redis lock around <code>charge()</code>: it cannot help once the provider already processed the
+                first request.<span class="cite">stated · session</span></li>
+            </ul>
+          </div>
+          <div class="unk">
+            <h4>Unknowns</h4>
+            <ul>
+              <li>What idempotency guarantees and retention period the provider enforces.</li>
+            </ul>
+          </div>
+        </article>
+        <figcaption id="fig-cap" class="fig-caption">Blame a few lines and get the story behind them. An agent sees the
+          rejected Redis lock before it tries it again.</figcaption>
+      </figure>
+    </section>
+
+    <section class="band" id="numbers" aria-labelledby="numbers-title">
+      <div class="wrap">
+        <h2 id="numbers-title" class="band-title">Distilled decisions, not transcripts</h2>
+        <dl class="stats">
+          <div>
+            <dt>Claims without cited evidence that survive validation</dt>
+            <dd>0</dd>
+          </div>
+          <div>
+            <dt>Raw session transcripts sent to a model</dt>
+            <dd>0</dd>
+          </div>
+          <div>
+            <dt>Changes to Git commits, messages, refs or notes</dt>
+            <dd>0</dd>
+          </div>
+          <div>
+            <dt>PRD acceptance scenarios passing as tests</dt>
+            <dd>15<span>/15</span></dd>
+          </div>
+        </dl>
+        <p class="band-note">Scrubbed, typed evidence goes to the model, never the raw log. Every call is listed in an
+          egress manifest stored with the story.</p>
+      </div>
+    </section>
+
+    <section class="wrap problem" id="problem">
+      <p class="kicker">01 · The problem</p>
+      <h2 class="section">The code survives. The reasons behind it don't.</h2>
+      <div class="cols">
+        <p class="wide">Every change carries decisions: why this approach, what was tried first, which constraint ruled
+          out the obvious fix. Today that lives in a chat session, a CI log or someone's head, and it's gone by the time
+          the next person, or the next agent, touches the code.</p>
+        <ul class="pains">
+          <li><strong>Commit messages say what, rarely why.</strong> And never what was tried and dropped.</li>
+          <li><strong>Agents repeat rejected approaches.</strong> Nothing tells them the lock was tried and failed.</li>
+          <li><strong>Transcripts are the wrong record.</strong> They're huge, they leak secrets, and nobody rereads
+            them.</li>
+          <li><strong>Old decisions go stale silently.</strong> A reason that held last quarter may not hold now, and
+            nothing says so.</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="wrap" id="how">
+      <p class="kicker">02 · How GitStory works</p>
+      <h2 class="section">Evidence while you work.<br>A story when it lands.</h2>
+      <div class="split" aria-label="Where GitStory fits">
+        <div>
+          <h3>Git</h3>
+          <p>holds what changed: commits, diffs, history.</p>
+        </div>
+        <div class="accent">
+          <h3>GitStory</h3>
+          <p>holds why: cited decisions, rejected options and unknowns, bound to the landed commit.</p>
+        </div>
+        <div>
+          <h3><a href="https://ghf.sh">ghf</a>, optionally</h3>
+          <p>holds what was tried. GitStory cites its checkpoints when it's installed.</p>
+        </div>
+      </div>
+
+      <div class="concepts">
+        <article><span class="num" aria-hidden="true">1</span>
+          <h3>Collect evidence</h3>
+          <p>Notes, test results, commits and Claude Code session logs become typed, scrubbed evidence events, kept on
+            your machine. Record a decision as you make it with <code>git story note</code>.</p>
+        </article>
+        <article><span class="num" aria-hidden="true">2</span>
+          <h3>Draft and land</h3>
+          <p>Hooks draft in the background, so nothing waits on a model. After the merge, <code>git story land</code>
+            reconciles the drafts with the code that landed. Approaches dropped in review never become decisions.</p>
+        </article>
+        <article><span class="num" aria-hidden="true">3</span>
+          <h3>Ask why</h3>
+          <p><code>blame</code>, <code>path</code>, <code>history</code> and <code>search</code> return the stories
+            behind lines and files. They follow <code>supersedes</code> links to the decision that holds now.</p>
+        </article>
+      </div>
+
+      <div class="example">
+        <div class="example-text">
+          <h3>Memory that stays current</h3>
+          <p>When a change reverses an earlier decision, it says so with <code>--supersedes</code>. Blame on any line
+            the old decision still covers also returns the story that replaced it, marked current.</p>
+        </div>
+        <pre class="term" aria-label="Example terminal session"><code><span class="p">$</span> git story note "Bring the Redis lock back: versioning missed cross-row writes" \
+    --supersedes st_01m5b
+<span class="p">$</span> git story blame lock.rs:3
+<span class="dim">st_01m5b  2870d7da  Remove the lock; row versioning replaces it [superseded]</span>
+<span class="ok">st_01m5c  9a1c44e0  Reintroduce the Redis lock for cross-row writes   (current; supersedes st_01m5b)</span>
+<span class="p">$</span> git story history st_01m5c
+<span class="dim">st_01m5a  5d07be21  Add a Redis lock [superseded]
+st_01m5b  2870d7da  Remove the lock [superseded]</span>
+<span class="ok">st_01m5c  9a1c44e0  Reintroduce the lock</span></code></pre>
+      </div>
+
+      <ol class="chain" aria-label="A supersession chain">
+        <li><span class="badge old tag">superseded</span>
+          <h3>A · Add a Redis lock</h3>
+          <p>Retries were double-charging customers.</p>
+        </li>
+        <li><span class="badge old tag">superseded</span>
+          <h3>B · Remove the lock</h3>
+          <p>Row versioning replaced it. Proposed as superseding A by blame, then accepted.</p>
+        </li>
+        <li class="now"><span class="badge tag">current</span>
+          <h3>C · Bring the lock back</h3>
+          <p>Versioning missed cross-row writes. Explicitly supersedes B.</p>
+        </li>
+      </ol>
+    </section>
+
+    <section class="wrap" id="trust">
+      <p class="kicker">Trustworthy by construction</p>
+      <h2 class="section">A story is only as good as its evidence.</h2>
+      <div class="grid two feat">
+        <article>
+          <h3><span class="ico" aria-hidden="true">#</span>Every claim is cited</h3>
+          <p>Each decision, rejected option and test result cites evidence events. A claim that cites nothing, or
+            cites something that doesn't exist, is dropped.</p>
+        </article>
+        <article>
+          <h3><span class="ico" aria-hidden="true">?</span>Guesses stay labeled</h3>
+          <p>A model's own reading goes in <code>hypotheses</code>, never in decisions. <code>--brief</code> leaves
+            hypotheses out, so agents never treat a guess as a constraint.</p>
+        </article>
+        <article>
+          <h3><span class="ico" aria-hidden="true">✓</span>A separate validation pass</h3>
+          <p>A second call checks every claim against its cited evidence and the landed diff. Test claims are checked
+            mechanically against the recorded pass and fail counts.</p>
+        </article>
+        <article>
+          <h3><span class="ico" aria-hidden="true">■</span>Durable on its own</h3>
+          <p>Each claim stands on the stored part of its evidence. Delete the session log or lose the CI link, and
+            <code>git story validate</code> still passes.</p>
+        </article>
+        <article>
+          <h3><span class="ico" aria-hidden="true">⌫</span>Secrets never leave</h3>
+          <p>Keys, tokens, <code>.env</code> values and high-entropy strings are scrubbed before anything is stored or
+            sent. <code>.storyignore</code> keeps paths and drops their content.</p>
+        </article>
+        <article>
+          <h3><span class="ico" aria-hidden="true">⇥</span>You decide what leaves</h3>
+          <p>One gate checks every model call against your egress policy and trusted endpoints. With <code>inference =
+              local</code>, no request leaves the machine. Each call is recorded in a manifest.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="wrap" id="agents">
+      <p class="kicker">Built for agents</p>
+      <h2 class="section">Built for agents to call</h2>
+      <div class="agents">
+        <div>
+          <p class="wide">The agent skill teaches the habit: blame before changing existing code, note real decisions
+            as they happen, supersede on purpose. Every command takes <code>--json</code> and returns one versioned
+            envelope.</p>
+          <ul class="ticks">
+            <li>Agent skill, installed with <code>git story skill install</code></li>
+            <li>Background drafting hooks for Claude Code and Git</li>
+            <li>Versioned <code>--json</code>, stable error and exit codes</li>
+            <li>No prompts, ever</li>
+          </ul>
+        </div>
+        <pre class="term"><code>{"schema":"gitstory.cli/v1","command":"blame","ok":true,
+ "data":{"path":"billing/retry.py","range":[5,10],"stories":[
+  {"current":true,"via":"blame","story":{
+   "story_id":"st_01m5aa3y…","status":"current",
+   "summary":"Reuse one idempotency key across charge retries",
+   "decisions":[{"claim":"Generate one key before the loop…","type":"observed"}],
+   "rejected":[{"claim":"A Redis lock around charge()…","type":"stated"}],
+   "unknowns":["What guarantees the provider enforces"]}}]}}</code></pre>
+      </div>
+    </section>
+
+    <section class="wrap" id="server">
+      <div class="server">
+        <div>
+          <p class="kicker">Your store</p>
+          <h2 class="section">Stories live where you put them</h2>
+          <p class="wide">Stories, cited evidence, links and egress manifests are plain JSON in a store you choose. A
+            local SQLite index makes lookups fast, and it can be rebuilt from the store at any time.</p>
+        </div>
+        <ul class="ticks">
+          <li>A local directory, or S3 and compatible stores, shared by the team</li>
+          <li>Export and import with nothing lost</li>
+          <li>Append-only link log, with proposals reviewed before they apply</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="wrap" id="start">
+      <h2 class="section">Quick start</h2>
+      <ol class="steps">
+        <li>
+          <h3>Install and enable a repository</h3>
+          <pre class="term"><code>cargo install --path cli        # from a GitStory checkout
+git story init                  # writes .gitstory; commit it
+git story trust                 # allow the configured model endpoint</code></pre>
+        </li>
+        <li>
+          <h3>Collect while you work</h3>
+          <pre class="term"><code>git story hooks install claude-code
+git story skill install
+git story note "Use row versioning instead of a Redis lock because CI has no Redis"</code></pre>
+        </li>
+        <li>
+          <h3>Land, then ask</h3>
+          <pre class="term"><code>git story land --work-unit feat/retry --to origin/main
+git story blame src/lock.rs:40-80 --brief</code></pre>
+        </li>
+      </ol>
+      <p class="wide">The model is configured in <code>.gitstory</code>: Anthropic, OpenAI, an OpenAI-compatible
+        local server, or any command. The <a href="https://github.com/varops/gitstory/blob/main/docs/cli.md">CLI
+          reference</a> covers the rest.</p>
+    </section>
+
+    <section class="wrap final" aria-labelledby="final-title">
+      <div class="final-inner">
+        <h2 id="final-title">Give every change its reasons.</h2>
+        <p>Works with plain Git, with or without ghf.</p>
+        <div class="cta">
+          <a class="btn primary" href="https://github.com/varops/gitstory">View GitStory on GitHub</a>
+          <a class="btn" href="https://ghf.sh">Meet ghf</a>
+        </div>
+      </div>
+    </section>
+
+    <section class="wrap note" aria-label="Preview notice">
+      <p><strong>Private preview.</strong> GitStory is in early development, and the name is a working title. Anything
+        can change before a first release, including commands, the story schema and the store format.</p>
+    </section>
+  </main>
+
+  <footer class="wrap foot">
+    <p>GitStory is a sibling project of <a href="https://ghf.sh">ghf</a>.</p>
+    <p><a href="https://github.com/varops/gitstory">GitHub</a> · <a
+        href="https://github.com/varops/gitstory/blob/main/docs/cli.md">CLI reference</a> · <a
+        href="https://github.com/varops/gitstory/blob/main/skills/gitstory/SKILL.md">Agent skill</a></p>
+  </footer>
+</body>
+
+</html>
