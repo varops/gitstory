@@ -18,7 +18,16 @@ if os.environ.get("MOCK_FAIL"):
 
 user = json.loads(req["user"])
 
+if "explanation" in req["schema"]["properties"]:
+    # The M0 control arm: one plain explanation.
+    print(json.dumps({"explanation": "Baseline: " + user["commit"]["subject"]}))
+    sys.exit(0)
+
 if "verdicts" in req["schema"]["properties"]:
+    if os.environ.get("MOCK_VERDICTS") == "skip":
+        # A model that answers without judging any claim.
+        print(json.dumps({"verdicts": []}))
+        sys.exit(0)
     out = []
     for c in user["claims"]:
         text = c["claim"]

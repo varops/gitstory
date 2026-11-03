@@ -203,6 +203,10 @@ Both run `git story draft --background --json`, so neither waits for the model. 
 
 Installs the agent skill as `.claude/skills/gitstory/SKILL.md`, or prints it. Data: `{path, changed}` or `{skill}`.
 
+### Study tools (hidden)
+
+`study audit CORPUS` and `land --study-baseline DIR` measure GitStory for the M0 study and are hidden from `--help`. See [study/README.md](../study/README.md).
+
 ## Configuration: `.gitstory`
 
 Commit this file. It holds no credentials.

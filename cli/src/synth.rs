@@ -126,7 +126,7 @@ fn verdict_schema() -> Value {
 }
 
 /// The events and diff the policy allows to leave, as JSON for the prompt.
-fn gated_bundle(
+pub(crate) fn gated_bundle(
     cfg: &RepoConfig,
     events: &[EvidenceEvent],
     diff: &[FileDiff],
@@ -238,7 +238,7 @@ fn strings(v: &Value) -> Vec<String> {
 }
 
 /// Enforce the story rules locally, whatever the model wrote.
-fn normalize(mut s: Story, events: &[EvidenceEvent]) -> Story {
+pub(crate) fn normalize(mut s: Story, events: &[EvidenceEvent]) -> Story {
     let known: BTreeSet<&str> = events.iter().map(|e| e.id.as_str()).collect();
     let keep = |mut c: Claim| -> Option<Claim> {
         c.evidence.retain(|e| known.contains(e.as_str()));

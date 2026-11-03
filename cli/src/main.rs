@@ -15,6 +15,7 @@ mod render;
 mod s3;
 mod scrub;
 mod store;
+mod study;
 mod synth;
 mod workspace;
 
@@ -25,7 +26,7 @@ use clap::Parser;
 use clap::error::ErrorKind;
 use gitstory_proto::{ErrorCode, ExitCode, Response};
 
-use cli::{Cli, Command, NoteType, TestResult};
+use cli::{Cli, Command, NoteType, StudyCommand, TestResult};
 use cmd::{EditArgs, Env, Out};
 use error::Result;
 
@@ -107,7 +108,9 @@ fn dispatch(env: &Env, cli: Cli) -> Result<Out> {
             work_unit,
             to,
             since,
-        } => cmd::land(env, work_unit, to, since),
+            study_baseline,
+        } => cmd::land(env, work_unit, to, since, study_baseline),
+        Command::Study(StudyCommand::Audit { corpus }) => cmd::study_audit(env, corpus),
         Command::Blame { target } => cmd::blame(env, target),
         Command::Path { path } => cmd::path(env, path),
         Command::History { story } => cmd::history(env, story),

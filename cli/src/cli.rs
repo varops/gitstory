@@ -106,6 +106,9 @@ pub enum Command {
         /// straight to main.
         #[arg(long)]
         since: Option<String>,
+        /// M0 study: also write the control arm and a blind rating sheet here.
+        #[arg(long, hide = true, value_name = "DIR")]
+        study_baseline: Option<PathBuf>,
     },
     /// Stories behind the lines of a file, following supersession forward.
     Blame {
@@ -190,12 +193,25 @@ pub enum Command {
         #[arg(long, value_enum, default_value = "project")]
         scope: Scope,
     },
+    /// Tools for the M0 quality study (hidden: they measure GitStory).
+    #[command(subcommand, hide = true)]
+    Study(StudyCommand),
     /// Install or print the agent skill.
     Skill {
         #[arg(value_parser = ["install", "show"])]
         action: String,
         #[arg(long, value_enum, default_value = "project")]
         scope: Scope,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum StudyCommand {
+    /// Run the real validator over claims whose truth is known and report
+    /// how many planted false claims it catches.
+    Audit {
+        /// Corpus JSON, e.g. study/validator-audit/corpus.json.
+        corpus: PathBuf,
     },
 }
 
@@ -225,6 +241,7 @@ impl Cli {
                 Command::Gc { .. } => "gc",
                 Command::Hooks { .. } => "hooks",
                 Command::Skill { .. } => "skill",
+                Command::Study(StudyCommand::Audit { .. }) => "study audit",
             },
         }
     }
