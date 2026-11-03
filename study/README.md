@@ -74,4 +74,6 @@ It un-blinds the labels and prints, per arm, the mean scores and the share rated
 
 ## Known gaps
 
-Behavior we know is wrong is pinned in [`cli/tests/known_gaps.rs`](../cli/tests/known_gaps.rs) by tests that pass while the gap is open. Fixing a gap makes its test fail; then flip the assertion and move the test to where the feature is tested.
+Fix first. A known bug goes into [`cli/tests/known_gaps.rs`](../cli/tests/known_gaps.rs) only when its fix has to wait, pinned by a test that passes while the bug is open. Fixing it makes that test fail; then flip the assertion and move the test to where the feature is tested.
+
+The audit's first run found two validator bugs, both fixed: a claim the model never ruled on was kept as supported, and a test claim with matching counts was accepted whatever else it said. Their tests are in [`cli/tests/validation.rs`](../cli/tests/validation.rs).

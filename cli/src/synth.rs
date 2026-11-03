@@ -536,8 +536,12 @@ pub fn validate(
             items.push((si, ci));
         }
     }
+    // With no validation model, claims stand on the local rules and the
+    // mechanical checks below. With one, a claim it does not rule on (it
+    // skipped it, or its answer was cut short) is not supported: it starts
+    // at "partly" and moves to hypotheses unless the model says "yes".
     let mut verdict: Vec<&str> = vec!["yes"; items.len()];
-    // Mechanical test checks first; they override the model.
+    // Mechanical test checks: the typed test facts can reject a claim.
     let mut mechanical: Vec<Option<bool>> = Vec::new();
     for (si, ci) in &items {
         mechanical.push(test_check(&sections[*si][*ci], &by_id));
@@ -562,6 +566,7 @@ pub fn validate(
             excerpts,
         };
         let v = gate.call(validation_model, &req, sent)?;
+        verdict.fill("partly");
         for item in v["verdicts"].as_array().cloned().unwrap_or_default() {
             if let (Some(i), Some(sup)) = (item["index"].as_u64(), item["supported"].as_str())
                 && let Some(slot) = verdict.get_mut(i as usize)
@@ -574,11 +579,12 @@ pub fn validate(
             }
         }
     }
+    // Counts that disagree with the test facts sink the claim. Counts that
+    // agree prove only the counts: the rest of the claim ("including new
+    // tests for UTC-5") still needs the model's yes.
     for (i, m) in mechanical.iter().enumerate() {
-        match m {
-            Some(false) => verdict[i] = "no",
-            Some(true) => verdict[i] = "yes",
-            None => {}
+        if *m == Some(false) {
+            verdict[i] = "no";
         }
     }
     // Apply, back to front so indices stay valid.
