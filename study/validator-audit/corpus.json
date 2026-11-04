@@ -30,7 +30,7 @@
         {"claim": "Kept the Redis lock as a fallback when the version check fails", "type": "observed", "evidence": ["ev_commit", "ev_abandon"], "truth": "planted", "plant": "contradicted", "falsehood": "Kept the Redis lock"},
         {"claim": "Jobs now execute under a Redis lock with a 30s lease", "type": "observed", "evidence": ["ev_redis", "ev_commit"], "truth": "planted", "plant": "stale", "falsehood": "now execute under a Redis lock"},
         {"claim": "A retry that sees an older version on the job row skips the job", "evidence": ["ev_reason"], "truth": "planted", "plant": "one_word", "falsehood": "older"},
-        {"claim": "The new version column defaults to 0 because CI has no Redis", "type": "observed", "evidence": ["ev_commit", "ev_reason"], "truth": "planted", "plant": "false_because", "falsehood": "because CI has no Redis"}
+        {"claim": "The new version column defaults to 0 because CI has no Redis", "type": "observed", "evidence": ["ev_commit", "ev_reason"], "truth": "planted", "plant": "false_because", "falsehood": "defaults to 0 because"}
       ]
     },
     {
@@ -478,7 +478,7 @@
         {"section": "evidence_summary", "claim": "FeedTests passed 26 of 27; testPrefetchCancelsOnReuse timed out after 2s", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
         {"section": "evidence_summary", "claim": "testPrefetchCancelsOnReuse timed out after 5s", "type": "observed", "evidence": ["ev_tests"], "truth": "planted", "plant": "test_misread", "falsehood": "5s"},
         {"claim": "Feed images are cached in a plain Dictionary keyed by URL", "type": "observed", "evidence": ["ev_dict", "ev_edit"], "truth": "planted", "plant": "rejected_as_implemented", "falsehood": "cached in a plain Dictionary"},
-        {"claim": "The image cache holds at most 500 images", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "wrong_number", "falsehood": "500 images"},
+        {"claim": "The image cache is capped at 500 images", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "wrong_number", "falsehood": "capped at 500 images"},
         {"claim": "NSCache was picked because it is thread-safe", "evidence": ["ev_decision"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "thread-safe"},
         {"claim": "FeedCell shows a cached image while starting a download", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "one_word", "falsehood": "while starting a download"},
         {"claim": "A plain Dictionary never evicts entries", "evidence": ["ev_decision"], "truth": "planted", "plant": "wrong_citation", "falsehood": "never evicts"}
@@ -532,7 +532,7 @@
         {"claim": "The server flushes its logger after shutdown", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
         {"claim": "No preStop hook was added; the platform team will tune that in the Helm chart", "evidence": ["ev_review", "ev_edit"], "truth": "supported"},
         {"section": "evidence_summary", "claim": "A staging rolling deploy under 200 rps of k6 load had 0 errors in 48,000 requests", "type": "observed", "evidence": ["ev_deploy"], "truth": "supported"},
-        {"claim": "In-flight requests get up to 30 seconds to finish", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "wrong_number", "falsehood": "up to 30 seconds"},
+        {"claim": "In-flight requests get a 30 second limit to finish", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "wrong_number", "falsehood": "30 second limit"},
         {"claim": "Added a preStop sleep hook so the load balancer stops sending traffic first", "type": "observed", "evidence": ["ev_review", "ev_edit"], "truth": "planted", "plant": "contradicted", "falsehood": "Added a preStop sleep hook"},
         {"section": "evidence_summary", "claim": "Deploys no longer drop any requests in production", "type": "observed", "evidence": ["ev_deploy", "ev_goal"], "truth": "planted", "plant": "overreach", "falsehood": "drop any requests in production"},
         {"claim": "The platform team set the 25 second shutdown limit", "evidence": ["ev_decision", "ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The platform team"},
@@ -543,7 +543,7 @@
     {
       "name": "api-image-size",
       "events": [
-        {"id": "ev_goal", "type": "goal", "fact": "goal: shrink the API image", "excerpt": "The API image is 1.2 GB and takes 4 minutes to pull on a cold node."},
+        {"id": "ev_goal", "type": "goal", "fact": "goal: shrink the API image", "excerpt": "The API image is 1.2 GB and takes 4 minutes to pull on a cold staging node."},
         {"id": "ev_decision", "type": "decision", "fact": "decision: multi-stage build", "excerpt": "Build wheels in a full python:3.12 stage, then copy only the wheels into python:3.12-slim. Compilers and headers stay out of the final image."},
         {"id": "ev_alpine", "type": "attempt", "fact": "edit: Dockerfile (alpine base)", "paths": ["Dockerfile"]},
         {"id": "ev_abandon", "type": "abandon", "fact": "abandon: alpine", "excerpt": "On alpine, numpy and psycopg have no musl wheels in our pinned versions, so pip compiled them from source and builds took 25 minutes. Back to slim."},
