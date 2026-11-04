@@ -157,7 +157,7 @@
         {"claim": "Removed the new_checkout flag and the legacy checkout component", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
         {"claim": "The legacy receipt template was kept because finance still emails it for refunds", "evidence": ["ev_note"], "truth": "supported"},
         {"claim": "The checkout page now always renders the new Checkout component", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
-        {"claim": "new_checkout had been at 100% rollout for six weeks when it was removed", "evidence": ["ev_goal"], "truth": "supported"},
+        {"claim": "new_checkout had been at 100% rollout for six weeks when it was removed", "evidence": ["ev_goal", "ev_edit"], "truth": "supported"},
         {"claim": "Removed the legacy receipt template along with the old checkout", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "contradicted", "falsehood": "Removed the legacy receipt template"},
         {"claim": "The flag was removed after it had been at 100% for three months", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_number", "falsehood": "three months"},
         {"claim": "The flag was removed because flags left behind are a common source of bugs", "evidence": ["ev_goal"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "common source of bugs"},
@@ -182,7 +182,7 @@
       "claims": [
         {"claim": "BillingClient now uses the JDK's java.net.http HttpClient instead of OkHttp", "type": "observed", "evidence": ["ev_edit", "ev_goal"], "truth": "supported"},
         {"claim": "The OkHttp dependency was removed from the billing build", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
-        {"claim": "Each billing request times out after 30 seconds", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "supported"},
+        {"claim": "Billing requests time out after 30 seconds", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "supported"},
         {"claim": "OkHttp was dropped to take two transitive jars and the Kotlin stdlib off the classpath", "evidence": ["ev_reason", "ev_edit"], "truth": "supported"},
         {"section": "rejected", "claim": "An async version built on sendAsync was dropped because every caller is synchronous", "type": "observed", "evidence": ["ev_async", "ev_abandon"], "truth": "supported"},
         {"section": "evidence_summary", "claim": "The billing tests passed 87 of 87", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
