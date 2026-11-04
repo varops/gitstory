@@ -95,6 +95,8 @@ fn stated() -> ClaimType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Fate {
     Kept,
+    /// Rewritten by the repair step to match its evidence, then kept.
+    Repaired,
     Hypothesis,
     Dropped,
 }
@@ -103,6 +105,7 @@ impl Fate {
     fn as_str(self) -> &'static str {
         match self {
             Self::Kept => "kept",
+            Self::Repaired => "repaired",
             Self::Hypothesis => "moved_to_hypotheses",
             Self::Dropped => "dropped",
         }
@@ -203,20 +206,32 @@ fn story_for(case: &Case, events: &[EvidenceEvent]) -> Result<Story> {
     Ok(s)
 }
 
-fn fate(s: &Story, text: &str) -> Fate {
-    let has = |l: &[Claim]| l.iter().any(|c| c.claim == text);
-    if has(&s.decisions) || has(&s.rejected) || has(&s.discarded) || has(&s.evidence_summary) {
-        Fate::Kept
-    } else if has(&s.hypotheses) {
-        Fate::Hypothesis
-    } else {
-        Fate::Dropped
+fn fate(s: &Story, text: &str, repairs: &[synth::Repair]) -> (Fate, Option<String>) {
+    if let Some(r) = repairs.iter().find(|r| r.from == text) {
+        return (Fate::Repaired, Some(r.to.clone()));
     }
+    let has = |l: &[Claim]| l.iter().any(|c| c.claim == text);
+    let f =
+        if has(&s.decisions) || has(&s.rejected) || has(&s.discarded) || has(&s.evidence_summary) {
+            Fate::Kept
+        } else if has(&s.hypotheses) {
+            Fate::Hypothesis
+        } else {
+            Fate::Dropped
+        };
+    (f, None)
+}
+
+/// What the audit must show: at least `min_caught` of planted claims
+/// caught, at most `max_lost` of true claims lost.
+pub struct Targets {
+    pub min_caught: f64,
+    pub max_lost: f64,
 }
 
 /// `git story study audit CORPUS`: run the real rules and validation pass
 /// over claims whose truth is known, with the repository's validation model.
-pub fn audit(ws: &Workspace, corpus_path: &Path) -> Result<Out> {
+pub fn audit(ws: &Workspace, corpus_path: &Path, targets: &Targets) -> Result<Out> {
     let text = fs::read_to_string(corpus_path)
         .map_err(|e| err!(Usage, "cannot read {}: {e}", corpus_path.display()))?;
     let corpus: Corpus = serde_json::from_str(&text).map_err(|e| {
@@ -242,7 +257,7 @@ pub fn audit(ws: &Workspace, corpus_path: &Path) -> Result<Out> {
             .collect();
         let story = story_for(case, &events)?;
         // The same order as landing: local rules first, then validation.
-        let checked = synth::validate(
+        let (checked, repairs) = synth::validate_logged(
             &ws.cfg,
             &mut gate,
             synth::normalize(story, &events),
@@ -252,17 +267,18 @@ pub fn audit(ws: &Workspace, corpus_path: &Path) -> Result<Out> {
         )?;
         for c in &case.claims {
             // Claims are scrubbed on the way in; compare like with like.
-            let f = fate(&checked, &scrub::scrub(&c.claim).0);
+            let (f, to) = fate(&checked, &scrub::scrub(&c.claim).0, &repairs);
             rows.push(json!({
                 "case": case.name,
                 "claim": c.claim,
                 "truth": c.truth,
                 "plant": c.plant,
                 "fate": f.as_str(),
+                "repaired_to": to,
             }));
         }
     }
-    let report = score(&rows);
+    let report = score(&rows, targets);
     let manifest = EgressManifest {
         id: id::new_id(id::EGRESS),
         calls: gate.calls,
@@ -274,12 +290,23 @@ pub fn audit(ws: &Workspace, corpus_path: &Path) -> Result<Out> {
     ))
 }
 
-fn score(rows: &[Value]) -> Value {
+/// A planted claim is caught unless it survived as written. A repaired one
+/// counts as caught (its wording changed) but is listed for a human to check
+/// that the rewrite really dropped the falsehood. A true claim is lost when
+/// it ends in hypotheses or is dropped; repaired true claims are kept.
+fn score(rows: &[Value], targets: &Targets) -> Value {
     let planted: Vec<&Value> = rows.iter().filter(|r| r["truth"] == "planted").collect();
     let supported: Vec<&Value> = rows.iter().filter(|r| r["truth"] == "supported").collect();
     let caught = planted.iter().filter(|r| r["fate"] != "kept").count();
     let dropped = planted.iter().filter(|r| r["fate"] == "dropped").count();
-    let lost = supported.iter().filter(|r| r["fate"] != "kept").count();
+    let lost_fate = |r: &&&Value| r["fate"] == "moved_to_hypotheses" || r["fate"] == "dropped";
+    let lost = supported.iter().filter(lost_fate).count();
+    let repaired = rows.iter().filter(|r| r["fate"] == "repaired").count();
+    let caught_rate = rate(caught, planted.len());
+    let lost_rate = rate(lost, supported.len());
+    let caught_target = target(&caught_rate, targets.min_caught, true);
+    let lost_target = target(&lost_rate, targets.max_lost, false);
+    let met = caught_target != "missed" && lost_target != "missed";
     let mut by_plant: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for r in &planted {
         let k = r["plant"].as_str().unwrap_or("unlabeled").to_owned();
@@ -290,14 +317,45 @@ fn score(rows: &[Value]) -> Value {
         }
     }
     json!({
-        "planted_caught": rate(caught, planted.len()),
+        "planted_caught": caught_rate,
         "planted_dropped": rate(dropped, planted.len()),
-        "supported_lost": rate(lost, supported.len()),
+        "supported_lost": lost_rate,
+        "repaired": repaired,
+        "targets": {
+            "min_caught": targets.min_caught,
+            "max_lost": targets.max_lost,
+            "caught": caught_target,
+            "lost": lost_target,
+            "met": met,
+        },
         "by_plant": by_plant
             .into_iter()
             .map(|(k, (c, n))| (k, rate(c, n)))
             .collect::<BTreeMap<_, _>>(),
     })
+}
+
+/// `shown` when the whole interval is on the right side of the target,
+/// `missed` when the rate itself is on the wrong side, `not_yet_shown` when
+/// the rate meets it but the interval is too wide to be sure.
+fn target(r: &Value, bound: f64, at_least: bool) -> &'static str {
+    let n = r["n"].as_u64().unwrap_or(0) as f64;
+    let p = if n == 0.0 {
+        if at_least { 0.0 } else { 1.0 }
+    } else {
+        r["k"].as_u64().unwrap_or(0) as f64 / n
+    };
+    let (lo, hi) = (
+        r["low"].as_f64().unwrap_or(0.0),
+        r["high"].as_f64().unwrap_or(1.0),
+    );
+    match at_least {
+        true if lo >= bound => "shown",
+        true if p < bound => "missed",
+        false if hi <= bound => "shown",
+        false if p > bound => "missed",
+        _ => "not_yet_shown",
+    }
 }
 
 fn rate(k: usize, n: usize) -> Value {
@@ -333,14 +391,26 @@ fn audit_text(report: &Value, rows: &[Value], cfg: &RepoConfig) -> String {
     let m = cfg.validation_model();
     let mut t = format!(
         "validator audit · model {} ({})\n\n\
-         planted claims caught   {}   (dropped or moved to hypotheses)\n\
+         planted claims caught   {}   target ≥ {:.0}%: {}\n\
          planted claims dropped  {}\n\
-         true claims lost        {}\n",
+         true claims lost        {}   target ≤ {:.0}%: {}\n\
+         claims repaired         {}\n",
         m.name,
         m.provider,
         fmt_rate(&report["planted_caught"]),
+        report["targets"]["min_caught"].as_f64().unwrap_or(0.0) * 100.0,
+        report["targets"]["caught"]
+            .as_str()
+            .unwrap_or_default()
+            .replace('_', " "),
         fmt_rate(&report["planted_dropped"]),
         fmt_rate(&report["supported_lost"]),
+        report["targets"]["max_lost"].as_f64().unwrap_or(0.0) * 100.0,
+        report["targets"]["lost"]
+            .as_str()
+            .unwrap_or_default()
+            .replace('_', " "),
+        report["repaired"],
     );
     if let Some(by) = report["by_plant"].as_object() {
         t.push_str("\ncaught by kind of plant\n");
@@ -348,11 +418,25 @@ fn audit_text(report: &Value, rows: &[Value], cfg: &RepoConfig) -> String {
             t.push_str(&format!("  {k:<22} {}\n", fmt_rate(v)));
         }
     }
+    let repaired: Vec<&Value> = rows.iter().filter(|r| r["fate"] == "repaired").collect();
+    if !repaired.is_empty() {
+        t.push_str("\nrepaired (check that each rewrite is true)\n");
+        for r in repaired {
+            t.push_str(&format!(
+                "  [{}] {}\n      was: {}\n      now: {}\n",
+                r["case"].as_str().unwrap_or_default(),
+                r["plant"].as_str().unwrap_or("true claim"),
+                r["claim"].as_str().unwrap_or_default(),
+                r["repaired_to"].as_str().unwrap_or_default(),
+            ));
+        }
+    }
     let misses: Vec<&Value> = rows
         .iter()
         .filter(|r| {
             (r["truth"] == "planted" && r["fate"] == "kept")
-                || (r["truth"] == "supported" && r["fate"] != "kept")
+                || (r["truth"] == "supported"
+                    && (r["fate"] == "moved_to_hypotheses" || r["fate"] == "dropped"))
         })
         .collect();
     if !misses.is_empty() {
@@ -367,7 +451,10 @@ fn audit_text(report: &Value, rows: &[Value], cfg: &RepoConfig) -> String {
             ));
         }
     }
-    t.push_str("\n95% Wilson intervals. Overlapping intervals do not tell two rates apart.");
+    t.push_str(&format!(
+        "\ntargets {}. 95% Wilson intervals; \"not yet shown\" means the rate meets the target but the interval is too wide to be sure. Overlapping intervals do not tell two rates apart.",
+        if report["targets"]["met"] == true { "met" } else { "MISSED" }
+    ));
     t
 }
 

@@ -51,7 +51,7 @@ fn audit_counts_what_the_validator_catches() {
         [
             ("Used X because Y", "kept"),
             ("UNSUPPORTED invented reason", "dropped"),
-            ("MAYBE a guess", "moved_to_hypotheses"),
+            ("MAYBE a guess", "repaired"),
             ("All 10 tests passed", "dropped"),
             ("Cites an event that does not exist", "dropped"),
         ]
@@ -62,8 +62,27 @@ fn audit_counts_what_the_validator_catches() {
     assert_eq!(rep["planted_dropped"]["k"], 3);
     assert_eq!(rep["supported_lost"]["k"], 0);
     assert_eq!(rep["by_plant"]["invented"]["n"], 2);
-    // The validation call went through the gate and is in the manifest.
-    assert_eq!(v["egress"]["calls"][0]["purpose"], "validation");
+    assert_eq!(rep["repaired"], 1);
+    let repaired = v["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["fate"] == "repaired")
+        .unwrap();
+    assert_eq!(repaired["repaired_to"], "a guess");
+    // 4 of 4 planted caught meets 95% but 4 claims cannot show it; 0 of 1
+    // true claims lost is the same story for the 5% ceiling.
+    assert_eq!(rep["targets"]["caught"], "not_yet_shown");
+    assert_eq!(rep["targets"]["lost"], "not_yet_shown");
+    assert_eq!(rep["targets"]["met"], true);
+    // Validation, repair and revalidation all went through the gate.
+    let purposes: Vec<&str> = v["egress"]["calls"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["purpose"].as_str().unwrap())
+        .collect();
+    assert_eq!(purposes, ["validation", "repair", "revalidation"]);
 }
 
 #[test]
@@ -214,4 +233,45 @@ fn score_script_unblinds_and_reports_intervals() {
     );
     assert!(text.contains("gitstory  accuracy   mean 5.00"), "{text}");
     assert!(text.contains("do not tell the arms apart"), "{text}");
+}
+
+#[test]
+fn audit_reports_missed_targets() {
+    let r = Repo::new("targets");
+    let mut claims =
+        vec![json!({"claim": "Used X because Y", "evidence": ["ev_1"], "truth": "supported"})];
+    // Planted claims the stand-in model accepts: none of them is caught.
+    for i in 0..3 {
+        claims.push(
+            json!({"claim": format!("Planted claim {i}"), "evidence": ["ev_1"],
+                           "truth": "planted", "plant": "invented"}),
+        );
+    }
+    let corpus = json!({"cases": [{"name": "t",
+        "events": [{"id": "ev_1", "type": "reason", "fact": "reason: x", "excerpt": "Use X because Y."}],
+        "claims": claims}]});
+    let v = r.ok(&["study", "audit", &write_corpus(&r, &corpus)]);
+    assert_eq!(v["report"]["targets"]["caught"], "missed");
+    assert_eq!(v["report"]["targets"]["met"], false);
+    // Custom targets are passed through.
+    let v = r.ok(&[
+        "study",
+        "audit",
+        &write_corpus(&r, &corpus),
+        "--min-caught",
+        "0",
+        "--max-lost",
+        "1",
+    ]);
+    assert_eq!(v["report"]["targets"]["met"], true);
+    assert_eq!(
+        r.err(&[
+            "study",
+            "audit",
+            &write_corpus(&r, &corpus),
+            "--min-caught",
+            "95"
+        ]),
+        "E_USAGE"
+    );
 }

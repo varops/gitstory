@@ -23,6 +23,17 @@ if "explanation" in req["schema"]["properties"]:
     print(json.dumps({"explanation": "Baseline: " + user["commit"]["subject"]}))
     sys.exit(0)
 
+if "revisions" in req["schema"]["properties"]:
+    # The repair step: drop the hedge word, unless told to give up.
+    out = []
+    for c in user["claims"]:
+        if os.environ.get("MOCK_REPAIR") == "none":
+            out.append({"index": c["index"], "claim": None})
+        else:
+            out.append({"index": c["index"], "claim": c["claim"].replace("MAYBE ", "")})
+    print(json.dumps({"revisions": out}))
+    sys.exit(0)
+
 if "verdicts" in req["schema"]["properties"]:
     if os.environ.get("MOCK_VERDICTS") == "skip":
         # A model that answers without judging any claim.

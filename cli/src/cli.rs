@@ -212,6 +212,12 @@ pub enum StudyCommand {
     Audit {
         /// Corpus JSON, e.g. study/validator-audit/corpus.json.
         corpus: PathBuf,
+        /// Target share of planted claims caught.
+        #[arg(long, default_value_t = 0.95)]
+        min_caught: f64,
+        /// Target ceiling on the share of true claims lost.
+        #[arg(long, default_value_t = 0.05)]
+        max_lost: f64,
     },
 }
 

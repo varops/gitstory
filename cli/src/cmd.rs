@@ -815,8 +815,14 @@ pub fn search(env: &Env, query: String) -> Result<Out> {
 /// Re-run validation on a landed story using only what the store holds:
 /// the durable parts of cited events. Session logs, CI links and ghf traces
 /// may be gone; the story must still hold up (PRD §8.4).
-pub fn study_audit(env: &Env, corpus: PathBuf) -> Result<Out> {
-    crate::study::audit(&env.ws()?, &corpus)
+pub fn study_audit(env: &Env, corpus: PathBuf, targets: crate::study::Targets) -> Result<Out> {
+    if !(0.0..=1.0).contains(&targets.min_caught) || !(0.0..=1.0).contains(&targets.max_lost) {
+        fail!(
+            Usage,
+            "--min-caught and --max-lost are shares between 0 and 1"
+        );
+    }
+    crate::study::audit(&env.ws()?, &corpus, &targets)
 }
 
 pub fn validate(env: &Env, rev: String) -> Result<Out> {

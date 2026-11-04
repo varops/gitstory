@@ -27,12 +27,19 @@ git story study audit study/validator-audit/corpus.json
 git story study audit study/validator-audit/corpus.json --json > audit.json
 ```
 
-It runs the same steps as landing (local rules, then the validation pass) and reports:
+It runs the same steps as landing (local rules, then the validation pass with its repair step) and reports:
 
-- **planted claims caught:** dropped, or moved to hypotheses. This is the number behind "every claim is cited".
+- **planted claims caught:** dropped, moved to hypotheses, or rewritten by repair. This is the number behind "every claim is cited".
 - **planted claims dropped:** caught and removed outright.
-- **true claims lost:** the cost side. A validator that drops everything catches every plant.
+- **true claims lost:** moved to hypotheses or dropped. The cost side: a validator that drops everything catches every plant.
+- **claims repaired:** each rewrite is listed with its old and new wording. Check that every rewritten planted claim really lost its falsehood.
 - a breakdown by kind of plant, and every miss.
+
+Each run is scored against two targets: at least 95% of planted claims caught, and at most 5% of true claims lost. Change them with `--min-caught 0.9 --max-lost 0.1`. A target reads **shown** when the whole interval is on the right side, **not yet shown** when the rate meets it but the corpus is too small to be sure, and **missed** when the rate itself is on the wrong side. Both targets matter: catching everything is easy if you also lose every true claim.
+
+### The repair step
+
+When the validation model says a claim is only partly supported, its note says what is missing. Landing then asks the synthesis model once to rewrite the claim using only its cited evidence and the diff, and judges the rewrite again. A rewrite that passes replaces the claim; anything else moves to hypotheses as before. This saves true claims that were worded beyond their evidence (for example "64 MiB" where the diff says `64 * 1024`). The repair and second check are recorded in the egress manifest with purposes `repair` and `revalidation`, and only run when a claim fails.
 
 The fixture data goes to the model through the egress gate like any other call. The manifest is in the `--json` output; nothing is written to the store.
 

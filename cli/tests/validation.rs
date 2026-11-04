@@ -113,3 +113,47 @@ fn without_a_validation_model_only_mechanical_checks_apply() {
     assert_eq!(fate(&v, "Used X because Y"), "kept");
     assert_eq!(fate(&v, "All 10 tests passed"), "dropped");
 }
+
+/// A partly supported claim gets one rewrite that sticks to its evidence;
+/// the rewrite is judged again and kept only if it passes.
+#[test]
+fn partly_supported_claims_are_repaired_once() {
+    let r = Repo::new("val-repair");
+    let corpus = json!({"cases": [{
+        "name": "repair",
+        "events": [{"id": "ev_1", "type": "reason", "fact": "reason: x", "excerpt": "Use X because Y."}],
+        "claims": [{"claim": "MAYBE Used X because Y", "evidence": ["ev_1"], "truth": "supported"}]
+    }]});
+    let v = audit(&r, &corpus, &[]);
+    assert_eq!(fate(&v, "MAYBE Used X because Y"), "repaired");
+    // When the rewrite gives up, the claim moves to hypotheses as before.
+    let v = audit(&r, &corpus, &[("MOCK_REPAIR", "none")]);
+    assert_eq!(fate(&v, "MAYBE Used X because Y"), "moved_to_hypotheses");
+}
+
+/// Landing uses the repaired text in the story.
+#[test]
+fn landed_story_keeps_the_repaired_wording() {
+    let r = Repo::new("val-land-repair");
+    r.git(&["checkout", "-qb", "feat/r"]);
+    r.write("r.rs", "r\n");
+    r.ok(&["note", "MAYBE Use R because the review asked for it"]);
+    r.commit_all("Add r");
+    r.git(&["checkout", "-q", "main"]);
+    r.git(&["merge", "-q", "--no-ff", "feat/r", "-m", "Merge feat/r"]);
+    let landed = r.ok(&["land", "--work-unit", "feat/r", "--to", "HEAD"]);
+    let decisions: Vec<&str> = landed["story"]["decisions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["claim"].as_str().unwrap())
+        .collect();
+    assert!(
+        decisions.contains(&"Use R because the review asked for it"),
+        "{decisions:?}"
+    );
+    assert!(
+        decisions.iter().all(|d| !d.contains("MAYBE")),
+        "{decisions:?}"
+    );
+}

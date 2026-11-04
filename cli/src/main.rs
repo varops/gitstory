@@ -110,7 +110,18 @@ fn dispatch(env: &Env, cli: Cli) -> Result<Out> {
             since,
             study_baseline,
         } => cmd::land(env, work_unit, to, since, study_baseline),
-        Command::Study(StudyCommand::Audit { corpus }) => cmd::study_audit(env, corpus),
+        Command::Study(StudyCommand::Audit {
+            corpus,
+            min_caught,
+            max_lost,
+        }) => cmd::study_audit(
+            env,
+            corpus,
+            study::Targets {
+                min_caught,
+                max_lost,
+            },
+        ),
         Command::Blame { target } => cmd::blame(env, target),
         Command::Path { path } => cmd::path(env, path),
         Command::History { story } => cmd::history(env, story),
