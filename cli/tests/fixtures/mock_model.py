@@ -43,7 +43,10 @@ if "verdicts" in req["schema"]["properties"]:
     for c in user["claims"]:
         text = c["claim"]
         sup = "no" if "UNSUPPORTED" in text else "partly" if "MAYBE" in text else "yes"
-        out.append({"index": c["index"], "supported": sup, "note": ""})
+        out.append({"index": c["index"], "claim": text, "supported": sup, "note": ""})
+    if os.environ.get("MOCK_VERDICTS") == "swap" and len(out) > 1:
+        # A model that mixes up indexes but echoes the right claims.
+        out[0]["index"], out[1]["index"] = out[1]["index"], out[0]["index"]
     print(json.dumps({"verdicts": out}))
     sys.exit(0)
 

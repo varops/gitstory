@@ -157,3 +157,21 @@ fn landed_story_keeps_the_repaired_wording() {
         "{decisions:?}"
     );
 }
+
+/// A model that swaps indexes but echoes the right claim text cannot keep a
+/// rejected claim or drop a supported one.
+#[test]
+fn swapped_indexes_do_not_move_verdicts() {
+    let r = Repo::new("val-swap");
+    let corpus = json!({"cases": [{
+        "name": "swap",
+        "events": [{"id": "ev_1", "type": "reason", "fact": "reason: x", "excerpt": "Use X because Y."}],
+        "claims": [
+            {"claim": "UNSUPPORTED invented reason", "evidence": ["ev_1"], "truth": "planted", "plant": "invented"},
+            {"claim": "Used X because Y", "evidence": ["ev_1"], "truth": "supported"}
+        ]
+    }]});
+    let v = audit(&r, &corpus, &[("MOCK_VERDICTS", "swap")]);
+    assert_eq!(fate(&v, "UNSUPPORTED invented reason"), "dropped");
+    assert_eq!(fate(&v, "Used X because Y"), "kept");
+}

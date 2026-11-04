@@ -67,7 +67,8 @@ const VALIDATE: &str = r#"You check claims against evidence. For each claim you 
 - "partly": plausible, but the evidence does not establish it.
 - "no": unsupported or contradicted.
 You also get the diff of the commit the story describes. It is evidence for claims about what the code does, when the claim cites a commit or edit event.
-Judge only from the evidence and diff given. Do not use outside knowledge."#;
+Judge only from the evidence and diff given. Do not use outside knowledge.
+Copy each claim's text exactly into "claim" in its verdict, so the verdict cannot attach to the wrong claim."#;
 
 fn claim_schema() -> Value {
     json!({
@@ -114,9 +115,10 @@ fn verdict_schema() -> Value {
             "verdicts": {"type": "array", "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["index", "supported", "note"],
+                "required": ["index", "claim", "supported", "note"],
                 "properties": {
                     "index": {"type": "integer"},
+                    "claim": {"type": "string"},
                     "supported": {"type": "string", "enum": ["yes", "partly", "no"]},
                     "note": {"type": "string"}
                 }
@@ -582,20 +584,58 @@ fn judge(
         excerpts,
     };
     let v = gate.call(cfg.validation_model(), &req, sent)?;
-    let mut out = vec![("partly", String::new()); claims.len()];
+    Ok(match_verdicts(claims, &v))
+}
+
+/// Attach each verdict to the claim whose text it echoes, not to the index
+/// it names: models swap indexes (a "no" for one claim landing on its
+/// neighbor). A verdict whose text matches no claim is ignored, and a claim
+/// that gets two different verdicts is not judged; both stay "partly".
+fn match_verdicts(claims: &[(String, Vec<Value>)], v: &Value) -> Vec<(&'static str, String)> {
+    let norm = |t: &str| {
+        t.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end_matches(['.', ';'])
+            .to_lowercase()
+    };
+    let keys: Vec<String> = claims.iter().map(|(c, _)| norm(c)).collect();
+    let mut seen: Vec<Option<(&'static str, String)>> = vec![None; claims.len()];
+    let mut conflict = vec![false; claims.len()];
     for item in v["verdicts"].as_array().cloned().unwrap_or_default() {
-        if let (Some(i), Some(sup)) = (item["index"].as_u64(), item["supported"].as_str())
-            && let Some(slot) = out.get_mut(i as usize)
-        {
-            slot.0 = match sup {
-                "no" => "no",
-                "partly" => "partly",
-                _ => "yes",
-            };
-            slot.1 = item["note"].as_str().unwrap_or_default().to_owned();
+        let (Some(text), Some(sup)) = (item["claim"].as_str(), item["supported"].as_str()) else {
+            continue;
+        };
+        let key = norm(text);
+        // Prefer the named index when its text matches (claims can repeat).
+        let named = item["index"]
+            .as_u64()
+            .map(|i| i as usize)
+            .filter(|i| keys.get(*i) == Some(&key));
+        let Some(i) =
+            named.or_else(|| (0..keys.len()).find(|i| keys[*i] == key && seen[*i].is_none()))
+        else {
+            continue;
+        };
+        let sup = match sup {
+            "no" => "no",
+            "partly" => "partly",
+            _ => "yes",
+        };
+        let note = item["note"].as_str().unwrap_or_default().to_owned();
+        match &seen[i] {
+            Some((prev, _)) if *prev != sup => conflict[i] = true,
+            Some(_) => {}
+            None => seen[i] = Some((sup, note)),
         }
     }
-    Ok(out)
+    seen.into_iter()
+        .zip(conflict)
+        .map(|(s, c)| match s {
+            Some(v) if !c => v,
+            _ => ("partly", String::new()),
+        })
+        .collect()
 }
 
 /// The validation pass (PRD §9.5): durable parts only. Unsupported claims are
@@ -844,6 +884,36 @@ mod tests {
             status: None,
             evidence: ids.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    fn texts(t: &[&str]) -> Vec<(String, Vec<Value>)> {
+        t.iter().map(|c| (c.to_string(), Vec::new())).collect()
+    }
+
+    #[test]
+    fn verdicts_attach_by_echoed_text_not_index() {
+        let claims = texts(&["The suite passed 50 of 50 runs", "A 60s lease was dropped"]);
+        // The model swapped the indexes but echoed the right text.
+        let v = json!({"verdicts": [
+            {"index": 0, "claim": "A 60s lease was dropped", "supported": "no", "note": "30s, not 60s"},
+            {"index": 1, "claim": "The suite passed 50 of 50 runs.", "supported": "yes", "note": "50/50"}
+        ]});
+        let out = match_verdicts(&claims, &v);
+        assert_eq!(out[0], ("yes", "50/50".to_owned()));
+        assert_eq!(out[1], ("no", "30s, not 60s".to_owned()));
+    }
+
+    #[test]
+    fn unmatched_or_conflicting_verdicts_leave_claims_unjudged() {
+        let claims = texts(&["A", "B"]);
+        let v = json!({"verdicts": [
+            {"index": 0, "claim": "something else", "supported": "yes", "note": ""},
+            {"index": 1, "claim": "B", "supported": "yes", "note": ""},
+            {"index": 1, "claim": "B", "supported": "no", "note": ""}
+        ]});
+        let out = match_verdicts(&claims, &v);
+        assert_eq!(out[0].0, "partly");
+        assert_eq!(out[1].0, "partly");
     }
 
     #[test]
