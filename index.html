@@ -26,6 +26,7 @@
         <a href="#how">How it works</a>
         <a href="#ghf">ghf</a>
         <a href="#trust">Trust</a>
+        <a href="#benchmark">Benchmark</a>
         <a href="#agents">For agents</a>
         <a href="#start">Quick start</a>
         <a href="https://github.com/varops/gitstory/blob/main/docs/cli.md">Docs</a>
@@ -315,6 +316,44 @@ st_01m5b  2870d7da  Remove the lock [superseded]</span>
               local</code>, no request leaves the machine. Each call is recorded in a manifest.</p>
         </article>
       </div>
+    </section>
+
+    <section class="wrap" id="benchmark" aria-labelledby="benchmark-title">
+      <p class="kicker">Validator audit</p>
+      <h2 class="section" id="benchmark-title">119 of 119 planted false claims caught. 0 of 111 true claims lost.</h2>
+      <p class="wide">GitStory's promise is that every claim in a story is supported by its evidence. The validator audit tests that. It plants 119 false claims among 111 true ones, in 21 realistic cases across 14 languages and formats. The falsehoods come in 14 kinds: wrong numbers, one-word changes, a "because" nobody stated, wrong attribution, claims citing the wrong evidence, and more. Then it runs GitStory's real validation pass.</p>
+      <figure class="bench">
+        <div class="table">
+          <table>
+            <thead>
+              <tr>
+                <th scope="col">Validation model</th>
+                <th scope="col">False claims caught</th>
+                <th scope="col">True claims lost</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <th scope="row">Claude Opus 5.5</th>
+                <td><strong>119</strong>/119</td>
+                <td><strong>0</strong>/111</td>
+              </tr>
+              <tr>
+                <th scope="row">gpt-6-sol <span class="runs nw">(2 runs)</span></th>
+                <td><strong>119</strong>/119 <span class="nw">in both</span></td>
+                <td><strong>0</strong>/111 <span class="nw">in both</span></td>
+              </tr>
+              <tr>
+                <th scope="row">Claude Haiku 5.5</th>
+                <td><strong>118</strong>/119</td>
+                <td><strong>0</strong>/111</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <figcaption>With every model, at least 95% of false claims were caught and at most 5% of true claims lost, shown at 95% confidence (Wilson intervals: caught [0.969, 1.000] for Opus and gpt-6-sol, [0.954, 0.999] for Haiku; lost [0.000, 0.033] for all). Measured 2026-11-04 at commit <code>2600f2e</code>.</figcaption>
+      </figure>
+      <p class="bench-limit"><strong>What this shows.</strong> It is our own synthetic corpus, so it shows the validator enforces evidence. Whether real stories are accurate and useful is what the M0 study measures next. <a href="https://github.com/varops/gitstory/blob/main/study/validator-audit/RESULTS.md">Full results, method and limits</a></p>
     </section>
 
     <section class="wrap" id="agents">
