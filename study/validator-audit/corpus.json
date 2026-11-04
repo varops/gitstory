@@ -48,7 +48,7 @@
       ],
       "claims": [
         {"claim": "New passwords are hashed with argon2id at 64 MiB memory and 3 iterations", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "supported"},
-        {"claim": "bcrypt was replaced because it silently truncates passphrases longer than 72 bytes", "evidence": ["ev_review"], "truth": "supported"},
+        {"claim": "bcrypt was replaced because it silently truncates passphrases longer than 72 bytes", "evidence": ["ev_review", "ev_edit"], "truth": "supported"},
         {"claim": "Existing bcrypt hashes are rehashed with argon2id on the next successful login", "type": "observed", "evidence": ["ev_edit", "ev_constraint"], "truth": "supported"},
         {"claim": "The argon2id hasher runs with a single lane", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
         {"claim": "A wrong password against an old bcrypt hash is rejected with BadPassword", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
@@ -108,7 +108,7 @@
         {"claim": "Added a per-IP token bucket of 10 requests per minute with a burst of 5 on /login", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
         {"section": "evidence_summary", "claim": "The HTTP test suite passed 31 of 32 tests", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
         {"claim": "Login requests are limited per client IP address", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
-        {"claim": "The rate limit was added because of credential stuffing on /login", "evidence": ["ev_goal"], "truth": "supported"},
+        {"claim": "The rate limit was added because of credential stuffing on /login", "evidence": ["ev_goal", "ev_edit"], "truth": "supported"},
         {"claim": "Added a per-IP token bucket to every public endpoint", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "overreach", "falsehood": "every public endpoint"},
         {"section": "evidence_summary", "claim": "The HTTP test suite passed", "type": "observed", "evidence": ["ev_tests"], "truth": "planted", "plant": "test_misread", "falsehood": "The HTTP test suite passed"},
         {"claim": "The limit is per user account, so shared office IPs are not blocked", "type": "observed", "evidence": ["ev_decision"], "truth": "planted", "plant": "contradicted", "falsehood": "per user account"},
@@ -138,7 +138,7 @@
         {"section": "evidence_summary", "claim": "The invoice suite passed 64 of 64 tests, including new tests for UTC-5", "type": "observed", "evidence": ["ev_tests"], "truth": "planted", "plant": "overreach", "falsehood": "including new tests for UTC-5"},
         {"claim": "Invoices for customers in UTC-5 showed the next day", "evidence": ["ev_goal"], "truth": "planted", "plant": "one_word", "falsehood": "next day"},
         {"claim": "Invoice dates are sent as YYYY-MM-DD strings because the invoice suite passed 64 of 64 tests", "type": "observed", "evidence": ["ev_edit", "ev_tests"], "truth": "planted", "plant": "false_because", "falsehood": "because the invoice suite passed"},
-        {"claim": "The security team asked to store invoice dates as plain strings", "evidence": ["ev_reason"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The security team"}
+        {"claim": "The security team asked to store invoice dates as plain strings", "evidence": ["ev_reason"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The security team asked"}
       ]
     },
     {
@@ -183,11 +183,11 @@
         {"claim": "BillingClient now uses the JDK's java.net.http HttpClient instead of OkHttp", "type": "observed", "evidence": ["ev_edit", "ev_goal"], "truth": "supported"},
         {"claim": "The OkHttp dependency was removed from the billing build", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
         {"claim": "Each billing request times out after 30 seconds", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "supported"},
-        {"claim": "OkHttp was dropped to take two transitive jars and the Kotlin stdlib off the classpath", "evidence": ["ev_reason"], "truth": "supported"},
+        {"claim": "OkHttp was dropped to take two transitive jars and the Kotlin stdlib off the classpath", "evidence": ["ev_reason", "ev_edit"], "truth": "supported"},
         {"section": "rejected", "claim": "An async version built on sendAsync was dropped because every caller is synchronous", "type": "observed", "evidence": ["ev_async", "ev_abandon"], "truth": "supported"},
         {"section": "evidence_summary", "claim": "The billing tests passed 87 of 87", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
         {"claim": "BillingClient.invoice now returns a CompletableFuture", "type": "observed", "evidence": ["ev_async", "ev_edit"], "truth": "planted", "plant": "stale", "falsehood": "returns a CompletableFuture"},
-        {"claim": "The platform team asked to keep the 5s connect and 30s request timeouts", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The platform team"},
+        {"claim": "The platform team asked to keep the 5s connect and 30s request timeouts", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The platform team asked"},
         {"claim": "OkHttp was dropped because the JDK client supports HTTP/2", "evidence": ["ev_reason"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "supports HTTP/2"},
         {"claim": "The connect timeout was raised to 5 seconds", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "one_word", "falsehood": "raised"},
         {"claim": "BillingClient calls the blocking send() because the payments team asked for 30s request timeouts", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "false_because", "falsehood": "because the payments team"}
@@ -265,7 +265,7 @@
         {"claim": "The memory limit doubled", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
         {"section": "evidence_summary", "claim": "Three replays of October's month-end export on staging ran with no OOMKilled pods", "type": "observed", "evidence": ["ev_replay"], "truth": "supported"},
         {"claim": "Added a HorizontalPodAutoscaler for the report worker", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "contradicted", "falsehood": "Added a HorizontalPodAutoscaler"},
-        {"claim": "The SRE reviewer chose to leave CPU unchanged", "evidence": ["ev_decision", "ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The SRE reviewer"},
+        {"claim": "The SRE reviewer chose to leave CPU unchanged", "evidence": ["ev_decision", "ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The SRE reviewer chose"},
         {"section": "evidence_summary", "claim": "Peak memory in the staging replays stayed under 768Mi", "type": "observed", "evidence": ["ev_replay"], "truth": "planted", "plant": "test_misread", "falsehood": "under 768Mi"},
         {"claim": "The memory request was lowered to 768Mi", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "one_word", "falsehood": "lowered"},
         {"claim": "Raised the memory limit to 1Gi, set the memory request to 768Mi, and raised the CPU limit to 2 cores", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "partly_false", "falsehood": "raised the CPU limit to 2 cores"}
@@ -373,7 +373,7 @@
         {"section": "evidence_summary", "claim": "The search tests passed 9 of 9", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
         {"claim": "The q parameter is escaped with addslashes before it reaches SQL", "type": "observed", "evidence": ["ev_escape", "ev_edit"], "truth": "planted", "plant": "rejected_as_implemented", "falsehood": "escaped with addslashes"},
         {"claim": "Every query in the codebase now uses prepared statements", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "overreach", "falsehood": "Every query in the codebase"},
-        {"claim": "The pentest report asked for bound parameters instead of escaping", "evidence": ["ev_abandon", "ev_goal"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The pentest report"},
+        {"claim": "The pentest report asked for bound parameters instead of escaping", "evidence": ["ev_abandon", "ev_goal"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The pentest report asked"},
         {"claim": "Search now uses a prepared statement, still filters to published products, and limits results to 50 rows", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "partly_false", "falsehood": "limits results to 50 rows"},
         {"section": "evidence_summary", "claim": "The search tests passed 9 of 9 on the addslashes version", "type": "observed", "evidence": ["ev_tests", "ev_escape"], "truth": "planted", "plant": "test_misread", "falsehood": "on the addslashes version"}
       ]
@@ -535,7 +535,7 @@
         {"claim": "In-flight requests get a 30 second limit to finish", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "wrong_number", "falsehood": "30 second limit"},
         {"claim": "Added a preStop sleep hook so the load balancer stops sending traffic first", "type": "observed", "evidence": ["ev_review", "ev_edit"], "truth": "planted", "plant": "contradicted", "falsehood": "Added a preStop sleep hook"},
         {"section": "evidence_summary", "claim": "Deploys no longer drop any requests in production", "type": "observed", "evidence": ["ev_deploy", "ev_goal"], "truth": "planted", "plant": "overreach", "falsehood": "drop any requests in production"},
-        {"claim": "The platform team set the 25 second shutdown limit", "evidence": ["ev_decision", "ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The platform team"},
+        {"claim": "The platform team set the 25 second shutdown limit", "evidence": ["ev_decision", "ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The platform team set"},
         {"claim": "Kubernetes sends SIGKILL when the 30 second grace period ends", "evidence": ["ev_decision"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "SIGKILL"},
         {"claim": "Pods used to exit on SIGTERM while requests were still in flight", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_citation", "falsehood": "while requests were still in flight"}
       ]
