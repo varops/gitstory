@@ -505,13 +505,30 @@ pub struct Repair {
     pub to: String,
 }
 
+/// The first verdict on one claim, before any repair, with the checker's
+/// note. For audits: it shows why a claim was kept, moved or dropped.
+#[derive(Debug, Clone)]
+pub struct Judged {
+    pub claim: String,
+    /// `yes`, `partly` or `no`, after the mechanical test check.
+    pub verdict: &'static str,
+    pub note: String,
+}
+
+/// What validation did, for audits.
+#[derive(Debug, Clone, Default)]
+pub struct ValidationLog {
+    pub judged: Vec<Judged>,
+    pub repairs: Vec<Repair>,
+}
+
 const REPAIR: &str = r#"You fix claims that a checker could not fully confirm. For each claim you get its text, the evidence it cites (typed facts and excerpts only), the checker's note on what is missing, and the diff of the change.
 Rewrite each claim so the cited evidence and the diff alone support it:
 - keep what they support, remove or correct what they do not;
 - use their exact numbers, names and units, as written;
 - add no facts and use no outside knowledge;
 - keep the claim's meaning: a reason stays a reason, an outcome stays an outcome, a decision stays a decision. Do not swap it for a different, weaker fact that happens to be supported.
-If the claim's meaning is not supported, return null for that claim."#;
+When the evidence supports the claim's meaning but not its wording (for example "64 MiB" where the diff says `64 * 1024`), reword it to match the evidence; that is what this step is for. Return null only when the evidence does not support the meaning itself."#;
 
 fn repair_schema() -> Value {
     json!({
@@ -603,7 +620,7 @@ pub fn validate_logged(
     events: &[EvidenceEvent],
     diff: &[FileDiff],
     ignored: &dyn Fn(&str) -> bool,
-) -> Result<(Story, Vec<Repair>)> {
+) -> Result<(Story, ValidationLog)> {
     let by_id: HashMap<&str, &EvidenceEvent> = events.iter().map(|e| (e.id.as_str(), e)).collect();
     let excerpts = cfg.egress.send_excerpts && cfg.collection.excerpts == "on";
     let sections: [&mut Vec<Claim>; 4] = [
@@ -649,6 +666,16 @@ pub fn validate_logged(
             verdict[i].0 = "no";
         }
     }
+
+    let judged: Vec<Judged> = claims
+        .iter()
+        .zip(&verdict)
+        .map(|((c, _), (v, note))| Judged {
+            claim: c.clone(),
+            verdict: v,
+            note: note.clone(),
+        })
+        .collect();
 
     // Repair: a partly supported claim is often a true claim worded beyond
     // its evidence ("64 MiB" for `64 * 1024`). Ask once for a rewrite that
@@ -743,7 +770,7 @@ pub fn validate_logged(
         s.unknowns
             .push("No decision in this change is supported by the evidence.".into());
     }
-    Ok((s, repairs))
+    Ok((s, ValidationLog { judged, repairs }))
 }
 
 /// Safety net after reconciliation: a decision whose only evidence is

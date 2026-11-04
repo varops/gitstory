@@ -70,6 +70,24 @@ fn audit_counts_what_the_validator_catches() {
         .find(|c| c["fate"] == "repaired")
         .unwrap();
     assert_eq!(repaired["repaired_to"], "a guess");
+    // Each claim carries the checker's first verdict; local rules remove
+    // the claim citing a missing event before the checker sees it.
+    let verdicts: Vec<&Value> = v["claims"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| &c["verdict"])
+        .collect();
+    assert_eq!(
+        verdicts,
+        [
+            &json!("yes"),
+            &json!("no"),
+            &json!("partly"),
+            &json!("no"),
+            &Value::Null
+        ]
+    );
     // 4 of 4 planted caught meets 95% but 4 claims cannot show it; 0 of 1
     // true claims lost is the same story for the 5% ceiling.
     assert_eq!(rep["targets"]["caught"], "not_yet_shown");

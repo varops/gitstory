@@ -257,7 +257,7 @@ pub fn audit(ws: &Workspace, corpus_path: &Path, targets: &Targets) -> Result<Ou
             .collect();
         let story = story_for(case, &events)?;
         // The same order as landing: local rules first, then validation.
-        let (checked, repairs) = synth::validate_logged(
+        let (checked, log) = synth::validate_logged(
             &ws.cfg,
             &mut gate,
             synth::normalize(story, &events),
@@ -267,7 +267,10 @@ pub fn audit(ws: &Workspace, corpus_path: &Path, targets: &Targets) -> Result<Ou
         )?;
         for c in &case.claims {
             // Claims are scrubbed on the way in; compare like with like.
-            let (f, to) = fate(&checked, &scrub::scrub(&c.claim).0, &repairs);
+            let text = scrub::scrub(&c.claim).0;
+            let (f, to) = fate(&checked, &text, &log.repairs);
+            // Claims the local rules removed never reach the checker.
+            let judged = log.judged.iter().find(|j| j.claim == text);
             rows.push(json!({
                 "case": case.name,
                 "claim": c.claim,
@@ -275,6 +278,8 @@ pub fn audit(ws: &Workspace, corpus_path: &Path, targets: &Targets) -> Result<Ou
                 "plant": c.plant,
                 "fate": f.as_str(),
                 "repaired_to": to,
+                "verdict": judged.map(|j| j.verdict),
+                "note": judged.map(|j| j.note.clone()),
             }));
         }
     }
@@ -456,6 +461,12 @@ fn audit_text(report: &Value, rows: &[Value], cfg: &RepoConfig) -> String {
                 r["fate"].as_str().unwrap_or_default(),
                 r["claim"].as_str().unwrap_or_default(),
             ));
+            if let Some(note) = r["note"].as_str().filter(|n| !n.is_empty()) {
+                t.push_str(&format!(
+                    "      checker said {}: {note}\n",
+                    r["verdict"].as_str().unwrap_or_default()
+                ));
+            }
         }
     }
     t.push_str(&format!(
