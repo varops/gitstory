@@ -105,6 +105,56 @@ fn audit_counts_what_the_validator_catches() {
 }
 
 #[test]
+fn a_repair_that_keeps_the_falsehood_is_not_a_catch() {
+    let r = Repo::new("falsehood");
+    // The stand-in model half-accepts MAYBE, and its repair strips only
+    // "MAYBE ". The first rewrite drops the labeled falsehood; the second
+    // still says it.
+    let corpus = json!({"cases": [{
+        "name": "c1",
+        "events": [{"id": "ev_1", "type": "reason", "fact": "reason: x", "excerpt": "Use X because Y."}],
+        "claims": [
+            {"claim": "Used X because Y", "evidence": ["ev_1"], "truth": "supported"},
+            {"claim": "MAYBE used X because Y", "evidence": ["ev_1"], "truth": "planted",
+             "plant": "one_word", "falsehood": "maybe"},
+            {"claim": "MAYBE used X because of a 60s lease", "evidence": ["ev_1"], "truth": "planted",
+             "plant": "wrong_number", "falsehood": "60S"}
+        ]
+    }]});
+    let v = r.ok(&["study", "audit", &write_corpus(&r, &corpus)]);
+    let rows = v["claims"].as_array().unwrap();
+    assert_eq!(rows[1]["fate"], "repaired");
+    assert_eq!(rows[1]["falsehood_kept"], false);
+    assert_eq!(rows[2]["fate"], "repaired");
+    assert_eq!(rows[2]["repaired_to"], "used X because of a 60s lease");
+    // Case-insensitive: "60S" is still in the rewrite.
+    assert_eq!(rows[2]["falsehood_kept"], true);
+    let rep = &v["report"];
+    assert_eq!(rep["planted_caught"]["k"], 1);
+    assert_eq!(rep["planted_caught"]["n"], 2);
+    assert_eq!(rep["by_plant"]["one_word"]["k"], 1);
+    assert_eq!(rep["by_plant"]["wrong_number"]["k"], 0);
+    assert_eq!(rep["repaired"], 2);
+    // The human report lists it under misses and marks it in the repairs.
+    let out = r
+        .cmd()
+        .args(["study", "audit", &write_corpus(&r, &corpus)])
+        .output()
+        .unwrap();
+    let human = String::from_utf8_lossy(&out.stdout);
+    let misses = human.split("\nmisses\n").nth(1).expect(&human);
+    assert!(
+        misses.contains("MAYBE used X because of a 60s lease"),
+        "{human}"
+    );
+    assert!(!misses.contains("MAYBE used X because Y"), "{human}");
+    assert!(
+        human.contains("still says \"60S\": counted as kept"),
+        "{human}"
+    );
+}
+
+#[test]
 fn the_shipped_corpus_is_well_formed() {
     let r = Repo::new("corpus");
     let v = r.ok(&["study", "audit", CORPUS]);

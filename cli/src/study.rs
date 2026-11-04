@@ -81,6 +81,10 @@ struct CaseClaim {
     /// What kind of falsehood was planted, for the breakdown.
     #[serde(default)]
     plant: Option<String>,
+    /// For a planted claim: the false part, as it appears in the claim
+    /// ("60s"). A repair that keeps it has not removed the falsehood.
+    #[serde(default)]
+    falsehood: Option<String>,
 }
 
 fn decisions() -> String {
@@ -271,13 +275,22 @@ pub fn audit(ws: &Workspace, corpus_path: &Path, targets: &Targets) -> Result<Ou
             let (f, to) = fate(&checked, &text, &log.repairs);
             // Claims the local rules removed never reach the checker.
             let judged = log.judged.iter().find(|j| j.claim == text);
+            // A rewrite that still says the false part did not fix it.
+            let falsehood_kept = c.truth == "planted"
+                && f == Fate::Repaired
+                && match (&c.falsehood, &to) {
+                    (Some(lie), Some(to)) => to.to_lowercase().contains(&lie.to_lowercase()),
+                    _ => false,
+                };
             rows.push(json!({
                 "case": case.name,
                 "claim": c.claim,
                 "truth": c.truth,
                 "plant": c.plant,
+                "falsehood": c.falsehood,
                 "fate": f.as_str(),
                 "repaired_to": to,
+                "falsehood_kept": falsehood_kept,
                 "verdict": judged.map(|j| j.verdict),
                 "note": judged.map(|j| j.note.clone()),
             }));
@@ -296,18 +309,23 @@ pub fn audit(ws: &Workspace, corpus_path: &Path, targets: &Targets) -> Result<Ou
 }
 
 /// A planted claim is caught unless it survived as written. A repaired one
-/// counts as caught (its wording changed) but is listed for a human to check
-/// that the rewrite really dropped the falsehood. A true claim is lost when
-/// it ends in hypotheses or is dropped; repaired true claims are kept.
+/// counts as caught only when its rewrite no longer says the labeled
+/// falsehood; with no label it counts as caught and is listed for a human to
+/// check. A true claim is lost when it ends in hypotheses or is dropped;
+/// repaired true claims are kept.
+fn caught(r: &Value) -> bool {
+    r["truth"] == "planted" && r["fate"] != "kept" && r["falsehood_kept"] != true
+}
+
 fn score(rows: &[Value], targets: &Targets) -> Value {
     let planted: Vec<&Value> = rows.iter().filter(|r| r["truth"] == "planted").collect();
     let supported: Vec<&Value> = rows.iter().filter(|r| r["truth"] == "supported").collect();
-    let caught = planted.iter().filter(|r| r["fate"] != "kept").count();
+    let caught_n = planted.iter().filter(|r| caught(r)).count();
     let dropped = planted.iter().filter(|r| r["fate"] == "dropped").count();
     let lost_fate = |r: &&&Value| r["fate"] == "moved_to_hypotheses" || r["fate"] == "dropped";
     let lost = supported.iter().filter(lost_fate).count();
     let repaired = rows.iter().filter(|r| r["fate"] == "repaired").count();
-    let caught_rate = rate(caught, planted.len());
+    let caught_rate = rate(caught_n, planted.len());
     let lost_rate = rate(lost, supported.len());
     let caught_target = target(&caught_rate, targets.min_caught, true);
     let lost_target = target(&lost_rate, targets.max_lost, false);
@@ -324,7 +342,7 @@ fn score(rows: &[Value], targets: &Targets) -> Value {
         let k = r["plant"].as_str().unwrap_or("unlabeled").to_owned();
         let e = by_plant.entry(k).or_default();
         e.1 += 1;
-        if r["fate"] != "kept" {
+        if caught(r) {
             e.0 += 1;
         }
     }
@@ -434,8 +452,15 @@ fn audit_text(report: &Value, rows: &[Value], cfg: &RepoConfig) -> String {
     if !repaired.is_empty() {
         t.push_str("\nrepaired (check that each rewrite is true)\n");
         for r in repaired {
+            let mark = match r["falsehood_kept"] == true {
+                true => format!(
+                    " · still says {:?}: counted as kept",
+                    r["falsehood"].as_str().unwrap_or_default()
+                ),
+                false => String::new(),
+            };
             t.push_str(&format!(
-                "  [{}] {}\n      was: {}\n      now: {}\n",
+                "  [{}] {}{mark}\n      was: {}\n      now: {}\n",
                 r["case"].as_str().unwrap_or_default(),
                 r["plant"].as_str().unwrap_or("true claim"),
                 r["claim"].as_str().unwrap_or_default(),
@@ -446,7 +471,7 @@ fn audit_text(report: &Value, rows: &[Value], cfg: &RepoConfig) -> String {
     let misses: Vec<&Value> = rows
         .iter()
         .filter(|r| {
-            (r["truth"] == "planted" && r["fate"] == "kept")
+            (r["truth"] == "planted" && !caught(r))
                 || (r["truth"] == "supported"
                     && (r["fate"] == "moved_to_hypotheses" || r["fate"] == "dropped"))
         })
@@ -461,6 +486,13 @@ fn audit_text(report: &Value, rows: &[Value], cfg: &RepoConfig) -> String {
                 r["fate"].as_str().unwrap_or_default(),
                 r["claim"].as_str().unwrap_or_default(),
             ));
+            if r["falsehood_kept"] == true {
+                t.push_str(&format!(
+                    "      rewrite still says {:?}: {}\n",
+                    r["falsehood"].as_str().unwrap_or_default(),
+                    r["repaired_to"].as_str().unwrap_or_default()
+                ));
+            }
             if let Some(note) = r["note"].as_str().filter(|n| !n.is_empty()) {
                 t.push_str(&format!(
                     "      checker said {}: {note}\n",
