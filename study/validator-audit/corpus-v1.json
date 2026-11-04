@@ -1,0 +1,137 @@
+{
+  "about": "Validator audit corpus. Each case holds durable evidence, a diff, and claims whose truth is known. Planted claims are false in a labeled way; the validator must drop them or move them to hypotheses. Supported claims must stay. Run: git story study audit study/validator-audit/corpus.json",
+  "cases": [
+    {
+      "name": "retry-lock",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: stop duplicate job execution under retries", "excerpt": "Jobs run twice when the worker retries after a timeout. Make execution exactly-once."},
+        {"id": "ev_redis", "type": "attempt", "fact": "edit: src/jobs/lock.py (Redis lock with 30s lease)", "paths": ["src/jobs/lock.py"]},
+        {"id": "ev_flaky", "type": "test", "fact": "test: pytest tests/retry -k lock, 47/50 pass", "test": {"command": "pytest tests/retry -k lock", "passed": 47, "total": 50}},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: Redis lock lease", "excerpt": "The lease expires while a slow job still runs, so a retry grabs the lock and runs the job again. Dropping the Redis lock."},
+        {"id": "ev_reason", "type": "reason", "fact": "reason: row versioning", "excerpt": "Use optimistic row versioning on the jobs table: a retry that sees a newer version skips the job. No new infrastructure, and CI has no Redis."},
+        {"id": "ev_green", "type": "test", "fact": "test: pytest tests/retry -k lock, 50/50 pass", "test": {"command": "pytest tests/retry -k lock", "passed": 50, "total": 50}},
+        {"id": "ev_commit", "type": "attempt", "fact": "edit: src/jobs/retry.py, migrations/0042_job_version.sql", "paths": ["src/jobs/retry.py", "migrations/0042_job_version.sql"]}
+      ],
+      "diff": [
+        {"path": "src/jobs/retry.py", "diff": "@@ -10,7 +10,12 @@ def run(job):\n-    with redis_lock(job.id, lease=30):\n-        execute(job)\n+    row = jobs.get(job.id)\n+    if row.version != job.version:\n+        return  # a newer attempt owns this job\n+    if jobs.bump_version(job.id, expected=row.version):\n+        execute(job)\n"},
+        {"path": "migrations/0042_job_version.sql", "diff": "@@ -0,0 +1 @@\n+ALTER TABLE jobs ADD COLUMN version INTEGER NOT NULL DEFAULT 0;\n"}
+      ],
+      "claims": [
+        {"claim": "Replaced the Redis lock with optimistic row versioning on the jobs table", "type": "observed", "evidence": ["ev_commit", "ev_reason"], "truth": "supported"},
+        {"claim": "Row versioning was chosen because it needs no new infrastructure and CI has no Redis", "evidence": ["ev_reason"], "truth": "supported"},
+        {"section": "rejected", "claim": "A Redis lock with a 30s lease was dropped because the lease could expire while a slow job still ran", "type": "observed", "evidence": ["ev_redis", "ev_abandon"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The retry lock suite passed 50 of 50 runs", "type": "observed", "evidence": ["ev_green"], "truth": "supported"},
+        {"claim": "Row versioning was chosen because it is faster than Redis under load", "evidence": ["ev_reason"], "truth": "planted", "plant": "wrong_reason"},
+        {"section": "rejected", "claim": "A Redis lock with a 60s lease was dropped because the lease could expire", "type": "observed", "evidence": ["ev_redis", "ev_abandon"], "truth": "planted", "plant": "wrong_number"},
+        {"section": "evidence_summary", "claim": "The retry lock suite passed 50 of 50 runs with the Redis lock", "type": "observed", "evidence": ["ev_flaky"], "truth": "planted", "plant": "test_misread"},
+        {"claim": "Added exponential backoff between job retries", "type": "observed", "evidence": ["ev_commit"], "truth": "planted", "plant": "invented"},
+        {"claim": "Kept the Redis lock as a fallback when the version check fails", "type": "observed", "evidence": ["ev_commit", "ev_abandon"], "truth": "planted", "plant": "contradicted"}
+      ]
+    },
+    {
+      "name": "password-hashing",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: move password hashing off bcrypt", "excerpt": "Security review flagged bcrypt's 72-byte input limit. Move to argon2id."},
+        {"id": "ev_review", "type": "review", "fact": "review: security team", "excerpt": "Passphrases longer than 72 bytes are silently truncated by bcrypt. Use argon2id with memory cost 64 MiB, 3 iterations."},
+        {"id": "ev_constraint", "type": "constraint", "fact": "constraint: existing hashes", "excerpt": "Existing bcrypt hashes must keep working. Rehash on next successful login."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/auth/hash.rs, src/auth/login.rs", "paths": ["src/auth/hash.rs", "src/auth/login.rs"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: cargo test auth::hash, 18/18 pass", "test": {"command": "cargo test auth::hash", "passed": 18, "total": 18}}
+      ],
+      "diff": [
+        {"path": "src/auth/hash.rs", "diff": "@@ -1,9 +1,28 @@\n-use bcrypt::{hash, verify, DEFAULT_COST};\n+use argon2::{Algorithm, Argon2, Params, Version};\n+use argon2::password_hash::{SaltString, rand_core::OsRng};\n+const PARAMS: (u32, u32, u32) = (64 * 1024, 3, 1); // memory KiB, iterations, lanes\n+pub fn hash_new(pw: &str) -> Result<String> {\n+    hash_argon2(pw)\n+}\n+fn hash_argon2(pw: &str) -> Result<String> {\n+    let (m, t, p) = PARAMS;\n+    let a = Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::new(m, t, p, None)?);\n+    Ok(a.hash_password(pw.as_bytes(), &SaltString::generate(&mut OsRng))?.to_string())\n+}\n+pub fn verify_and_upgrade(pw: &str, stored: &str) -> Result<Option<String>> {\n+    if stored.starts_with(\"$2\") {\n+        if bcrypt::verify(pw, stored)? { return Ok(Some(hash_argon2(pw)?)); }\n+        return Err(Error::BadPassword);\n+    }\n+    if !verify_argon2(pw, stored)? { return Err(Error::BadPassword); }\n+    Ok(None)\n+}\n"},
+        {"path": "src/auth/login.rs", "diff": "@@ -30,3 +30,6 @@ pub fn login(db: &Db, user: &User, pw: &str) -> Result<Session> {\n-    if !hash::verify(pw, &user.password_hash)? { return Err(Error::BadPassword); }\n+    match hash::verify_and_upgrade(pw, &user.password_hash) {\n+        Ok(Some(new_hash)) => db.set_password_hash(user.id, &new_hash)?,\n+        Ok(None) => {}\n+        Err(_) => return Err(Error::BadPassword),\n+    }\n"}
+      ],
+      "claims": [
+        {"claim": "New passwords are hashed with argon2id at 64 MiB memory and 3 iterations", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "supported"},
+        {"claim": "bcrypt was replaced because it silently truncates passphrases longer than 72 bytes", "evidence": ["ev_review"], "truth": "supported"},
+        {"claim": "Existing bcrypt hashes are rehashed with argon2id on the next successful login", "type": "observed", "evidence": ["ev_edit", "ev_constraint"], "truth": "supported"},
+        {"claim": "argon2id was chosen because it won the Password Hashing Competition", "evidence": ["ev_review"], "truth": "planted", "plant": "outside_knowledge"},
+        {"claim": "New passwords are hashed with argon2id at 64 MiB memory and 4 iterations", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "wrong_number"},
+        {"claim": "All existing bcrypt hashes are migrated to argon2id in a one-off batch job", "type": "observed", "evidence": ["ev_edit", "ev_constraint"], "truth": "planted", "plant": "contradicted"},
+        {"claim": "The agent decided to rehash on login to avoid a forced password reset", "evidence": ["ev_constraint"], "truth": "planted", "plant": "wrong_attribution"}
+      ]
+    },
+    {
+      "name": "cache-layer",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: cut p95 latency of /search", "excerpt": "p95 for /search is 1.8s. Target under 500ms."},
+        {"id": "ev_redis", "type": "attempt", "fact": "edit: src/search/redis_cache.ts", "paths": ["src/search/redis_cache.ts"]},
+        {"id": "ev_reject", "type": "review", "fact": "review: platform team", "excerpt": "No new services for this. Keep it in-process."},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: Redis cache", "excerpt": "Review said no new services, removing the Redis cache."},
+        {"id": "ev_lru", "type": "decision", "fact": "decision: in-process LRU", "excerpt": "Use an in-process LRU with 10,000 entries and a 60s TTL per instance."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/search/cache.ts", "paths": ["src/search/cache.ts"]},
+        {"id": "ev_bench", "type": "test", "fact": "test: npm run bench:search, 12/12 pass", "test": {"command": "npm run bench:search", "passed": 12, "total": 12}}
+      ],
+      "diff": [
+        {"path": "src/search/cache.ts", "diff": "@@ -0,0 +1,8 @@\n+import { LRUCache } from 'lru-cache';\n+export const searchCache = new LRUCache<string, Result[]>({ max: 10_000, ttl: 60_000 });\n"}
+      ],
+      "claims": [
+        {"claim": "Search results are cached in an in-process LRU of 10,000 entries with a 60s TTL", "type": "observed", "evidence": ["ev_edit", "ev_lru"], "truth": "supported"},
+        {"section": "rejected", "claim": "A Redis cache was tried and removed because review asked for no new services", "type": "observed", "evidence": ["ev_redis", "ev_abandon", "ev_reject"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The search benchmark suite passed 12 of 12 checks", "type": "observed", "evidence": ["ev_bench"], "truth": "supported"},
+        {"claim": "Search results are cached in Redis with a 60s TTL", "type": "observed", "evidence": ["ev_redis", "ev_lru"], "truth": "planted", "plant": "rejected_as_implemented"},
+        {"claim": "The cache brought p95 latency of /search under 500ms", "type": "observed", "evidence": ["ev_bench", "ev_goal"], "truth": "planted", "plant": "overreach"},
+        {"claim": "The cache is shared across all instances", "type": "observed", "evidence": ["ev_edit", "ev_lru"], "truth": "planted", "plant": "contradicted"},
+        {"section": "rejected", "claim": "A Redis cache was removed because it was too slow", "type": "observed", "evidence": ["ev_redis", "ev_abandon"], "truth": "planted", "plant": "wrong_reason"}
+      ]
+    },
+    {
+      "name": "rate-limit",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: rate-limit the public login endpoint", "excerpt": "Credential stuffing on /login. Add a rate limit there."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: token bucket", "excerpt": "Token bucket per IP: 10 requests per minute, burst of 5, on /login only."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/http/ratelimit.go, src/http/routes.go", "paths": ["src/http/ratelimit.go", "src/http/routes.go"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: go test ./src/http/..., 31/32 pass", "test": {"command": "go test ./src/http/...", "passed": 31, "total": 32}}
+      ],
+      "diff": [
+        {"path": "src/http/routes.go", "diff": "@@ -40,3 +40,3 @@\n-\tr.Post(\"/login\", login)\n+\tr.With(RateLimit(10, time.Minute, 5)).Post(\"/login\", login)\n"},
+        {"path": "src/http/ratelimit.go", "diff": "@@ -0,0 +1,30 @@\n+// RateLimit is a per-IP token bucket.\n+func RateLimit(n int, per time.Duration, burst int) func(http.Handler) http.Handler {\n"}
+      ],
+      "claims": [
+        {"claim": "Added a per-IP token bucket of 10 requests per minute with a burst of 5 on /login", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The HTTP test suite passed 31 of 32 tests", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "Added a per-IP token bucket to every public endpoint", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "overreach"},
+        {"section": "evidence_summary", "claim": "The HTTP test suite passed", "type": "observed", "evidence": ["ev_tests"], "truth": "planted", "plant": "test_misread"},
+        {"claim": "The limit is per user account, so shared office IPs are not blocked", "type": "observed", "evidence": ["ev_decision"], "truth": "planted", "plant": "contradicted"}
+      ]
+    },
+    {
+      "name": "date-parsing",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: fix invoice dates off by one day", "excerpt": "Invoices for customers in UTC-5 show the previous day."},
+        {"id": "ev_reason", "type": "reason", "fact": "reason: store dates, not timestamps", "excerpt": "Invoice dates are calendar dates. Parsing them as UTC midnight shifts them for negative offsets. Store and send them as plain YYYY-MM-DD strings."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/invoices/serialize.py", "paths": ["src/invoices/serialize.py"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: pytest tests/invoices, 64/64 pass", "test": {"command": "pytest tests/invoices", "passed": 64, "total": 64}}
+      ],
+      "diff": [
+        {"path": "src/invoices/serialize.py", "diff": "@@ -22,2 +22,2 @@\n-    \"date\": invoice.date.isoformat() + \"T00:00:00Z\",\n+    \"date\": invoice.date.isoformat(),\n"}
+      ],
+      "claims": [
+        {"claim": "Invoice dates are now serialized as plain YYYY-MM-DD strings instead of UTC midnight timestamps", "type": "observed", "evidence": ["ev_edit", "ev_reason"], "truth": "supported"},
+        {"claim": "Calendar dates parsed as UTC midnight shifted to the previous day for customers with negative UTC offsets", "evidence": ["ev_reason", "ev_goal"], "truth": "supported"},
+        {"claim": "Invoice dates are now stored in the customer's local time zone", "type": "observed", "evidence": ["ev_edit", "ev_reason"], "truth": "planted", "plant": "contradicted"},
+        {"claim": "The database column was changed from TIMESTAMP to DATE", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented"},
+        {"section": "evidence_summary", "claim": "The invoice suite passed 64 of 64 tests, including new tests for UTC-5", "type": "observed", "evidence": ["ev_tests"], "truth": "planted", "plant": "overreach"}
+      ]
+    },
+    {
+      "name": "feature-flag-removal",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: remove the new_checkout flag", "excerpt": "new_checkout has been at 100% for six weeks. Remove the flag and the old path."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/checkout/index.tsx, src/checkout/legacy.tsx, src/flags.ts", "paths": ["src/checkout/index.tsx", "src/checkout/legacy.tsx", "src/flags.ts"]},
+        {"id": "ev_note", "type": "decision", "fact": "decision: keep legacy receipt template", "excerpt": "Keep templates/receipt_legacy.html. Finance still emails it for refunds."}
+      ],
+      "diff": [
+        {"path": "src/checkout/legacy.tsx", "diff": "@@ -1,140 +0,0 @@\n-export function LegacyCheckout() {\n"},
+        {"path": "src/flags.ts", "diff": "@@ -8,1 +7,0 @@\n-  new_checkout: { rollout: 100 },\n"},
+        {"path": "src/checkout/index.tsx", "diff": "@@ -3,5 +3,1 @@\n-  return flags.new_checkout ? <Checkout /> : <LegacyCheckout />;\n+  return <Checkout />;\n"}
+      ],
+      "claims": [
+        {"claim": "Removed the new_checkout flag and the legacy checkout component", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "The legacy receipt template was kept because finance still emails it for refunds", "evidence": ["ev_note"], "truth": "supported"},
+        {"claim": "Removed the legacy receipt template along with the old checkout", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "contradicted"},
+        {"claim": "The flag was removed after it had been at 100% for three months", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_number"}
+      ]
+    }
+  ]
+}

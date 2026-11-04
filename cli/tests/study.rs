@@ -159,12 +159,25 @@ fn the_shipped_corpus_is_well_formed() {
     let r = Repo::new("corpus");
     let v = r.ok(&["study", "audit", CORPUS]);
     let rep = &v["report"];
-    assert!(rep["planted_caught"]["n"].as_u64().unwrap() >= 20, "{rep}");
-    assert!(rep["supported_lost"]["n"].as_u64().unwrap() >= 15, "{rep}");
-    // Every planted claim is labeled with what was planted.
+    // Enough claims that a perfect run can show both targets.
+    assert!(rep["planted_caught"]["n"].as_u64().unwrap() >= 80, "{rep}");
+    assert!(rep["supported_lost"]["n"].as_u64().unwrap() >= 80, "{rep}");
+    // The stand-in model accepts every claim, so a true claim lost here was
+    // removed by the local rules or the test check: a corpus bug.
+    assert_eq!(rep["supported_lost"]["k"], 0, "{rep}");
     for c in v["claims"].as_array().unwrap() {
         if c["truth"] == "planted" {
+            // Every planted claim is labeled with what was planted and
+            // names its false part, as written in the claim.
             assert!(c["plant"].is_string(), "{c}");
+            let lie = c["falsehood"]
+                .as_str()
+                .expect("planted claim has a falsehood");
+            let text = c["claim"].as_str().unwrap();
+            assert!(
+                !lie.is_empty() && text.to_lowercase().contains(&lie.to_lowercase()),
+                "{c}"
+            );
         } else {
             assert_eq!(c["truth"], "supported", "{c}");
         }
