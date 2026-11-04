@@ -15,7 +15,7 @@ GitStory keeps the "why" behind landed code. It collects evidence from agent ses
 
 ## Status
 
-M1 from the [plan](docs/plan-m1.md) is built, along with the landing, link and shared-store work the PRD puts in M2 and M3. All 15 PRD acceptance scenarios pass against a stand-in model. A first end-to-end run against OpenAI `gpt-6-luna` (draft, squash-merge landing, blame, re-validation) works. The Anthropic provider has not been called live yet. Next comes the M0 quality study: real Claude Code sessions, and auditors rating the stories.
+M1 from the [plan](docs/plan-m1.md) is built, along with the landing, link and shared-store work the PRD puts in M2 and M3. All 15 PRD acceptance scenarios pass against a stand-in model. A first end-to-end run against OpenAI `gpt-6-luna` (draft, squash-merge landing, blame, re-validation) works, and the validator audit below ran live through the `openai` provider with `gpt-6-sol`. The Anthropic provider has not been called live yet. Next comes the M0 quality study: real Claude Code sessions, and auditors rating the stories. The [study tools](study/README.md) are ready: a validator audit with planted false claims, and a control arm that rates each story blind against one plain model call on the same evidence.
 
 Built:
 - **Collection:** notes, test results, Git, Claude Code session logs, and ghf traces through ghf's public CLI.
@@ -26,6 +26,20 @@ Built:
 - **Retrieval:** `blame`, `path`, `history` and `search`, which follow `supersedes` links to the decision that holds now.
 - **Stores:** a local store and S3 (SigV4), a rebuildable SQLite index, and export and import.
 - **Hooks and skill:** background drafting hooks for Claude Code and Git, and the agent skill.
+
+## Benchmark
+
+GitStory's promise is that every claim in a story is supported by its evidence. The [validator audit](study/validator-audit/RESULTS.md) tests that promise: it plants 119 false claims among 111 true ones, in 21 realistic cases, and runs the real validation pass over them.
+
+| Validation model | False claims caught | True claims lost |
+|---|---|---|
+| Claude Opus 5.5 | 119/119 [0.969, 1.000] | 0/111 [0.000, 0.033] |
+| gpt-6-sol (2 runs) | 119/119 [0.969, 1.000] both | 0/111 [0.000, 0.033] both |
+| Claude Haiku 5.5 | 118/119 [0.954, 0.999] | 0/111 [0.000, 0.033] |
+
+With every model, at least 95% of false claims were caught and at most 5% of true claims lost, shown at 95% confidence (Wilson intervals in brackets). The corpus covers 14 kinds of falsehood, from wrong numbers to a "because" nobody stated.
+
+It is our own synthetic corpus, so it shows the validator enforces evidence; whether real stories are accurate and useful is what the M0 study measures next. Results, method and limits are in [RESULTS.md](study/validator-audit/RESULTS.md). Run it against your own model with `git story study audit study/validator-audit/corpus.json` (see [study/README.md](study/README.md)).
 
 ## Quick start
 

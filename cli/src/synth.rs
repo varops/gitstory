@@ -66,8 +66,9 @@ const VALIDATE: &str = r#"You check claims against evidence. For each claim you 
 - "yes": the evidence alone supports the claim as written.
 - "partly": plausible, but the evidence does not establish it.
 - "no": unsupported or contradicted.
-You also get the diff of the commit the story describes. It is evidence for claims about what the code does, when the claim cites a commit or edit event.
-Judge only from the evidence and diff given. Do not use outside knowledge."#;
+Each claim says whether the diff applies to it ("diff_applies"). Only when it is true is the diff of the change evidence for that claim, because the claim cites an edit or commit. When it is false, ignore the diff for that claim, even if the diff would support it.
+Judge each claim only from its own cited evidence, plus the diff when it applies. Evidence cited by other claims in this request does not count for it. Do not use outside knowledge.
+Copy each claim's text exactly into "claim" in its verdict, so the verdict cannot attach to the wrong claim."#;
 
 fn claim_schema() -> Value {
     json!({
@@ -114,9 +115,10 @@ fn verdict_schema() -> Value {
             "verdicts": {"type": "array", "items": {
                 "type": "object",
                 "additionalProperties": false,
-                "required": ["index", "supported", "note"],
+                "required": ["index", "claim", "supported", "note"],
                 "properties": {
                     "index": {"type": "integer"},
+                    "claim": {"type": "string"},
                     "supported": {"type": "string", "enum": ["yes", "partly", "no"]},
                     "note": {"type": "string"}
                 }
@@ -126,7 +128,7 @@ fn verdict_schema() -> Value {
 }
 
 /// The events and diff the policy allows to leave, as JSON for the prompt.
-fn gated_bundle(
+pub(crate) fn gated_bundle(
     cfg: &RepoConfig,
     events: &[EvidenceEvent],
     diff: &[FileDiff],
@@ -238,7 +240,7 @@ fn strings(v: &Value) -> Vec<String> {
 }
 
 /// Enforce the story rules locally, whatever the model wrote.
-fn normalize(mut s: Story, events: &[EvidenceEvent]) -> Story {
+pub(crate) fn normalize(mut s: Story, events: &[EvidenceEvent]) -> Story {
     let known: BTreeSet<&str> = events.iter().map(|e| e.id.as_str()).collect();
     let keep = |mut c: Claim| -> Option<Claim> {
         c.evidence.retain(|e| known.contains(e.as_str()));
@@ -498,16 +500,202 @@ fn test_check(c: &Claim, by_id: &HashMap<&str, &EvidenceEvent>) -> Option<bool> 
     Some(true)
 }
 
+/// A claim the repair step rewrote so its evidence supports it.
+#[derive(Debug, Clone)]
+pub struct Repair {
+    pub from: String,
+    pub to: String,
+}
+
+/// The first verdict on one claim, before any repair, with the checker's
+/// note. For audits: it shows why a claim was kept, moved or dropped.
+#[derive(Debug, Clone)]
+pub struct Judged {
+    pub claim: String,
+    /// `yes`, `partly` or `no`, after the mechanical test check.
+    pub verdict: &'static str,
+    pub note: String,
+}
+
+/// What validation did, for audits.
+#[derive(Debug, Clone, Default)]
+pub struct ValidationLog {
+    pub judged: Vec<Judged>,
+    pub repairs: Vec<Repair>,
+}
+
+const REPAIR: &str = r#"You fix claims that a checker could not fully confirm. For each claim you get its text, the evidence it cites (typed facts and excerpts only), the checker's note on what is missing, and whether the diff of the change applies to it ("diff_applies").
+Rewrite each claim so that its own cited evidence supports it, plus the diff only when "diff_applies" is true. Evidence cited by other claims does not count, and neither does the diff when it does not apply:
+- keep what they support, remove or correct what they do not;
+- use their exact numbers, names and units, as written;
+- add no facts and use no outside knowledge;
+- keep the claim's meaning: a reason stays a reason, an outcome stays an outcome, a decision stays a decision. Do not swap it for a different, weaker fact that happens to be supported.
+When the evidence supports the claim's meaning but not its wording (for example "64 MiB" where the diff says `64 * 1024`), reword it to match the evidence; that is what this step is for. Return null only when the evidence does not support the meaning itself."#;
+
+fn repair_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["revisions"],
+        "properties": {
+            "revisions": {"type": "array", "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["index", "claim"],
+                "properties": {
+                    "index": {"type": "integer"},
+                    "claim": {"type": ["string", "null"]}
+                }
+            }}
+        }
+    })
+}
+
+/// A claim as the checker and the repair step see it.
+#[derive(Debug, Clone)]
+struct ToCheck {
+    text: String,
+    /// The durable parts of the events it cites.
+    evidence: Vec<Value>,
+    /// Whether the diff counts as evidence for it: only when it cites an
+    /// edit or a commit, so a claim cannot borrow support from code it never
+    /// pointed at.
+    diff_applies: bool,
+}
+
+/// True when a claim cites an edit or a commit (an attempt that touched
+/// paths), which makes the diff part of its evidence.
+fn cites_code(c: &Claim, by_id: &HashMap<&str, &EvidenceEvent>) -> bool {
+    c.evidence.iter().any(|e| {
+        by_id
+            .get(e.as_str())
+            .is_some_and(|ev| ev.kind == EventType::Attempt && !ev.paths.is_empty())
+    })
+}
+
+/// The request body for the checker or the repair step. The diff is sent
+/// only when at least one claim may use it.
+fn claims_body(items: Vec<Value>, any_diff: bool, bundle: &Value) -> Value {
+    if any_diff {
+        json!({"claims": items, "diff": bundle["diff"]})
+    } else {
+        json!({"claims": items})
+    }
+}
+
+/// One model call that rules on `claims` (text plus cited evidence).
+/// A claim the answer does not cover counts as "partly".
+fn judge(
+    cfg: &RepoConfig,
+    gate: &mut Gate,
+    claims: &[ToCheck],
+    cited: &BTreeSet<String>,
+    diff: &[FileDiff],
+    ignored: &dyn Fn(&str) -> bool,
+    purpose: &'static str,
+) -> Result<Vec<(&'static str, String)>> {
+    let excerpts = cfg.egress.send_excerpts && cfg.collection.excerpts == "on";
+    // The commit's diff is durable too: it lives in Git. It is what proves
+    // claims about what the code does, for claims that cite an edit.
+    let any_diff = claims.iter().any(|c| c.diff_applies);
+    let (bundle, gated) = gated_bundle(cfg, &[], if any_diff { diff } else { &[] }, ignored);
+    let items: Vec<Value> = claims
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            json!({"index": i, "claim": c.text, "evidence": c.evidence, "diff_applies": c.diff_applies})
+        })
+        .collect();
+    let req = Request {
+        system: VALIDATE.into(),
+        user: serde_json::to_string_pretty(&claims_body(items, any_diff, &bundle))?,
+        schema: verdict_schema(),
+        max_tokens: 8_000,
+    };
+    let sent = Sent {
+        purpose,
+        event_ids: cited.iter().cloned().collect(),
+        hunks: gated.hunks,
+        excerpts,
+    };
+    let v = gate.call(cfg.validation_model(), &req, sent)?;
+    Ok(match_verdicts(claims, &v))
+}
+
+/// Attach each verdict to the claim whose text it echoes, not to the index
+/// it names: models swap indexes (a "no" for one claim landing on its
+/// neighbor). A verdict whose text matches no claim is ignored, and a claim
+/// that gets two different verdicts is not judged; both stay "partly".
+fn match_verdicts(claims: &[ToCheck], v: &Value) -> Vec<(&'static str, String)> {
+    let norm = |t: &str| {
+        t.split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .trim_end_matches(['.', ';'])
+            .to_lowercase()
+    };
+    let keys: Vec<String> = claims.iter().map(|c| norm(&c.text)).collect();
+    let mut seen: Vec<Option<(&'static str, String)>> = vec![None; claims.len()];
+    let mut conflict = vec![false; claims.len()];
+    for item in v["verdicts"].as_array().cloned().unwrap_or_default() {
+        let (Some(text), Some(sup)) = (item["claim"].as_str(), item["supported"].as_str()) else {
+            continue;
+        };
+        let key = norm(text);
+        // Prefer the named index when its text matches (claims can repeat).
+        let named = item["index"]
+            .as_u64()
+            .map(|i| i as usize)
+            .filter(|i| keys.get(*i) == Some(&key));
+        let Some(i) =
+            named.or_else(|| (0..keys.len()).find(|i| keys[*i] == key && seen[*i].is_none()))
+        else {
+            continue;
+        };
+        let sup = match sup {
+            "no" => "no",
+            "partly" => "partly",
+            _ => "yes",
+        };
+        let note = item["note"].as_str().unwrap_or_default().to_owned();
+        match &seen[i] {
+            Some((prev, _)) if *prev != sup => conflict[i] = true,
+            Some(_) => {}
+            None => seen[i] = Some((sup, note)),
+        }
+    }
+    seen.into_iter()
+        .zip(conflict)
+        .map(|(s, c)| match s {
+            Some(v) if !c => v,
+            _ => ("partly", String::new()),
+        })
+        .collect()
+}
+
 /// The validation pass (PRD §9.5): durable parts only. Unsupported claims are
-/// dropped; partly supported ones become hypotheses.
+/// dropped; partly supported ones get one repair attempt, then become
+/// hypotheses if the rewrite does not pass either.
 pub fn validate(
+    cfg: &RepoConfig,
+    gate: &mut Gate,
+    s: Story,
+    events: &[EvidenceEvent],
+    diff: &[FileDiff],
+    ignored: &dyn Fn(&str) -> bool,
+) -> Result<Story> {
+    validate_logged(cfg, gate, s, events, diff, ignored).map(|(s, _)| s)
+}
+
+/// [`validate`], also returning the claims the repair step rewrote.
+pub fn validate_logged(
     cfg: &RepoConfig,
     gate: &mut Gate,
     mut s: Story,
     events: &[EvidenceEvent],
     diff: &[FileDiff],
     ignored: &dyn Fn(&str) -> bool,
-) -> Result<Story> {
+) -> Result<(Story, ValidationLog)> {
     let by_id: HashMap<&str, &EvidenceEvent> = events.iter().map(|e| (e.id.as_str(), e)).collect();
     let excerpts = cfg.egress.send_excerpts && cfg.collection.excerpts == "on";
     let sections: [&mut Vec<Claim>; 4] = [
@@ -516,9 +704,10 @@ pub fn validate(
         &mut s.discarded,
         &mut s.evidence_summary,
     ];
-    // Index every authoritative claim.
+    // Index every authoritative claim, with its cited evidence (durable
+    // parts only: no external pointers).
     let mut items: Vec<(usize, usize)> = Vec::new();
-    let mut prompt_items = Vec::new();
+    let mut claims: Vec<ToCheck> = Vec::new();
     let mut cited = BTreeSet::new();
     for (si, list) in sections.iter().enumerate() {
         for (ci, c) in list.iter().enumerate() {
@@ -528,66 +717,126 @@ pub fn validate(
                 .filter_map(|e| by_id.get(e.as_str()))
                 .map(|e| {
                     cited.insert(e.id.clone());
-                    // Durable parts only: no external pointers.
                     event_json(e, excerpts)
                 })
                 .collect();
-            prompt_items.push(json!({"index": items.len(), "claim": c.claim, "evidence": evs}));
+            claims.push(ToCheck {
+                text: c.claim.clone(),
+                evidence: evs,
+                diff_applies: cites_code(c, &by_id),
+            });
             items.push((si, ci));
         }
     }
-    let mut verdict: Vec<&str> = vec!["yes"; items.len()];
-    // Mechanical test checks first; they override the model.
-    let mut mechanical: Vec<Option<bool>> = Vec::new();
-    for (si, ci) in &items {
-        mechanical.push(test_check(&sections[*si][*ci], &by_id));
+    // With no validation model, claims stand on the local rules and the
+    // mechanical checks below. With one, a claim it does not rule on is not
+    // supported (see `judge`).
+    let has_model = !items.is_empty() && cfg.validation_model().provider != "none";
+    let mut verdict: Vec<(&str, String)> = if has_model {
+        judge(cfg, gate, &claims, &cited, diff, ignored, "validation")?
+    } else {
+        vec![("yes", String::new()); items.len()]
+    };
+    // Counts that disagree with the test facts sink the claim. Counts that
+    // agree prove only the counts: the rest of the claim ("including new
+    // tests for UTC-5") still needs the model's yes.
+    for (i, (si, ci)) in items.iter().enumerate() {
+        if test_check(&sections[*si][*ci], &by_id) == Some(false) {
+            verdict[i].0 = "no";
+        }
     }
-    let validation_model = cfg.validation_model();
-    if !items.is_empty() && validation_model.provider != "none" {
-        // The commit's diff is durable too: it lives in Git. It is what
-        // proves claims about what the code does.
-        let (bundle, gated) = gated_bundle(cfg, &[], diff, ignored);
+
+    let judged: Vec<Judged> = claims
+        .iter()
+        .zip(&verdict)
+        .map(|(c, (v, note))| Judged {
+            claim: c.text.clone(),
+            verdict: v,
+            note: note.clone(),
+        })
+        .collect();
+
+    // Repair: a partly supported claim is often a true claim worded beyond
+    // its evidence ("64 MiB" for `64 * 1024`). Ask once for a rewrite that
+    // sticks to the evidence, then judge the rewrite like any other claim.
+    let mut repairs = Vec::new();
+    let partly: Vec<usize> = (0..items.len())
+        .filter(|i| verdict[*i].0 == "partly")
+        .collect();
+    if has_model && !partly.is_empty() {
+        let any_diff = partly.iter().any(|i| claims[*i].diff_applies);
+        let (bundle, gated) = gated_bundle(cfg, &[], if any_diff { diff } else { &[] }, ignored);
+        let asks: Vec<Value> = partly
+            .iter()
+            .enumerate()
+            .map(|(k, i)| {
+                let c = &claims[*i];
+                json!({"index": k, "claim": c.text, "evidence": c.evidence,
+                       "diff_applies": c.diff_applies, "note": verdict[*i].1})
+            })
+            .collect();
         let req = Request {
-            system: VALIDATE.into(),
-            user: serde_json::to_string_pretty(
-                &json!({"claims": prompt_items, "diff": bundle["diff"]}),
-            )?,
-            schema: verdict_schema(),
+            system: REPAIR.into(),
+            user: serde_json::to_string_pretty(&claims_body(asks, any_diff, &bundle))?,
+            schema: repair_schema(),
             max_tokens: 8_000,
         };
         let sent = Sent {
-            purpose: "validation",
-            event_ids: cited.into_iter().collect(),
+            purpose: "repair",
+            event_ids: cited.iter().cloned().collect(),
             hunks: gated.hunks,
             excerpts,
         };
-        let v = gate.call(validation_model, &req, sent)?;
-        for item in v["verdicts"].as_array().cloned().unwrap_or_default() {
-            if let (Some(i), Some(sup)) = (item["index"].as_u64(), item["supported"].as_str())
-                && let Some(slot) = verdict.get_mut(i as usize)
+        let v = gate.call(&cfg.model, &req, sent)?;
+        // (index into items, rewritten text)
+        let mut rewrites: Vec<(usize, String)> = Vec::new();
+        for r in v["revisions"].as_array().cloned().unwrap_or_default() {
+            let (Some(k), Some(text)) = (r["index"].as_u64(), r["claim"].as_str()) else {
+                continue;
+            };
+            let Some(&i) = partly.get(k as usize) else {
+                continue;
+            };
+            let text = strip_ids(&scrub::scrub(text.trim()).0);
+            if !text.is_empty() && text != claims[i].text && !rewrites.iter().any(|(j, _)| *j == i)
             {
-                *slot = match sup {
-                    "no" => "no",
-                    "partly" => "partly",
-                    _ => "yes",
+                rewrites.push((i, text));
+            }
+        }
+        if !rewrites.is_empty() {
+            let again: Vec<ToCheck> = rewrites
+                .iter()
+                .map(|(i, t)| ToCheck {
+                    text: t.clone(),
+                    ..claims[*i].clone()
+                })
+                .collect();
+            let second = judge(cfg, gate, &again, &cited, diff, ignored, "revalidation")?;
+            for ((i, text), (sup, _)) in rewrites.into_iter().zip(second) {
+                let (si, ci) = items[i];
+                let rewritten = Claim {
+                    claim: text.clone(),
+                    ..sections[si][ci].clone()
                 };
+                if sup == "yes" && test_check(&rewritten, &by_id) != Some(false) {
+                    repairs.push(Repair {
+                        from: claims[i].text.clone(),
+                        to: text,
+                    });
+                    sections[si][ci] = rewritten;
+                    verdict[i].0 = "yes";
+                }
             }
         }
     }
-    for (i, m) in mechanical.iter().enumerate() {
-        match m {
-            Some(false) => verdict[i] = "no",
-            Some(true) => verdict[i] = "yes",
-            None => {}
-        }
-    }
+
     // Apply, back to front so indices stay valid.
     let mut moved = Vec::new();
     let mut order: Vec<usize> = (0..items.len()).collect();
     order.sort_by(|a, b| items[*b].cmp(&items[*a]));
     for i in order {
         let (si, ci) = items[i];
-        match verdict[i] {
+        match verdict[i].0 {
             "no" => {
                 sections[si].remove(ci);
             }
@@ -607,7 +856,7 @@ pub fn validate(
         s.unknowns
             .push("No decision in this change is supported by the evidence.".into());
     }
-    Ok(s)
+    Ok((s, ValidationLog { judged, repairs }))
 }
 
 /// Safety net after reconciliation: a decision whose only evidence is
@@ -681,6 +930,42 @@ mod tests {
             status: None,
             evidence: ids.iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    fn texts(t: &[&str]) -> Vec<ToCheck> {
+        t.iter()
+            .map(|c| ToCheck {
+                text: c.to_string(),
+                evidence: Vec::new(),
+                diff_applies: false,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn verdicts_attach_by_echoed_text_not_index() {
+        let claims = texts(&["The suite passed 50 of 50 runs", "A 60s lease was dropped"]);
+        // The model swapped the indexes but echoed the right text.
+        let v = json!({"verdicts": [
+            {"index": 0, "claim": "A 60s lease was dropped", "supported": "no", "note": "30s, not 60s"},
+            {"index": 1, "claim": "The suite passed 50 of 50 runs.", "supported": "yes", "note": "50/50"}
+        ]});
+        let out = match_verdicts(&claims, &v);
+        assert_eq!(out[0], ("yes", "50/50".to_owned()));
+        assert_eq!(out[1], ("no", "30s, not 60s".to_owned()));
+    }
+
+    #[test]
+    fn unmatched_or_conflicting_verdicts_leave_claims_unjudged() {
+        let claims = texts(&["A", "B"]);
+        let v = json!({"verdicts": [
+            {"index": 0, "claim": "something else", "supported": "yes", "note": ""},
+            {"index": 1, "claim": "B", "supported": "yes", "note": ""},
+            {"index": 1, "claim": "B", "supported": "no", "note": ""}
+        ]});
+        let out = match_verdicts(&claims, &v);
+        assert_eq!(out[0].0, "partly");
+        assert_eq!(out[1].0, "partly");
     }
 
     #[test]

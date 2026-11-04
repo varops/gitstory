@@ -1,0 +1,572 @@
+{
+  "about": "Validator audit corpus, v2. Each case holds durable evidence, a diff, and claims whose truth is known. True claims are fully supported by their cited evidence and the diff; some are reworded or use other units. Planted claims are false in a labeled way (plant) and name their false part (falsehood); the validator must drop them, move them to hypotheses, or repair them so the falsehood is gone. Run: git story study audit study/validator-audit/corpus.json",
+  "cases": [
+    {
+      "name": "retry-lock",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: stop duplicate job execution under retries", "excerpt": "Jobs run twice when the worker retries after a timeout. Make execution exactly-once."},
+        {"id": "ev_redis", "type": "attempt", "fact": "edit: src/jobs/lock.py (Redis lock with 30s lease)", "paths": ["src/jobs/lock.py"]},
+        {"id": "ev_flaky", "type": "test", "fact": "test: pytest tests/retry -k lock, 47/50 pass", "test": {"command": "pytest tests/retry -k lock", "passed": 47, "total": 50}},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: Redis lock lease", "excerpt": "The lease expires while a slow job still runs, so a retry grabs the lock and runs the job again. Dropping the Redis lock."},
+        {"id": "ev_reason", "type": "reason", "fact": "reason: row versioning", "excerpt": "Use optimistic row versioning on the jobs table: a retry that sees a newer version skips the job. No new infrastructure, and CI has no Redis."},
+        {"id": "ev_green", "type": "test", "fact": "test: pytest tests/retry -k lock, 50/50 pass", "test": {"command": "pytest tests/retry -k lock", "passed": 50, "total": 50}},
+        {"id": "ev_commit", "type": "attempt", "fact": "edit: src/jobs/retry.py, migrations/0042_job_version.sql", "paths": ["src/jobs/retry.py", "migrations/0042_job_version.sql"]}
+      ],
+      "diff": [
+        {"path": "src/jobs/retry.py", "diff": "@@ -10,7 +10,12 @@ def run(job):\n-    with redis_lock(job.id, lease=30):\n-        execute(job)\n+    row = jobs.get(job.id)\n+    if row.version != job.version:\n+        return  # a newer attempt owns this job\n+    if jobs.bump_version(job.id, expected=row.version):\n+        execute(job)\n"},
+        {"path": "migrations/0042_job_version.sql", "diff": "@@ -0,0 +1 @@\n+ALTER TABLE jobs ADD COLUMN version INTEGER NOT NULL DEFAULT 0;\n"}
+      ],
+      "claims": [
+        {"claim": "Replaced the Redis lock with optimistic row versioning on the jobs table", "type": "observed", "evidence": ["ev_commit", "ev_reason"], "truth": "supported"},
+        {"claim": "Row versioning was chosen because it needs no new infrastructure and CI has no Redis", "evidence": ["ev_reason"], "truth": "supported"},
+        {"section": "rejected", "claim": "A Redis lock with a 30s lease was dropped because the lease could expire while a slow job still ran", "type": "observed", "evidence": ["ev_redis", "ev_abandon"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The retry lock suite passed 50 of 50 runs", "type": "observed", "evidence": ["ev_green"], "truth": "supported"},
+        {"claim": "A retry that finds a newer version on the job row skips the job instead of running it", "type": "observed", "evidence": ["ev_commit", "ev_reason"], "truth": "supported"},
+        {"claim": "Migration 0042 adds a non-null integer version column to the jobs table, defaulting to 0", "type": "observed", "evidence": ["ev_commit"], "truth": "supported"},
+        {"claim": "Row versioning was chosen because it is faster than Redis under load", "evidence": ["ev_reason"], "truth": "planted", "plant": "wrong_reason", "falsehood": "faster than Redis under load"},
+        {"section": "rejected", "claim": "A Redis lock with a 60s lease was dropped because the lease could expire", "type": "observed", "evidence": ["ev_redis", "ev_abandon"], "truth": "planted", "plant": "wrong_number", "falsehood": "60s"},
+        {"section": "evidence_summary", "claim": "The retry lock suite passed 50 of 50 runs with the Redis lock", "type": "observed", "evidence": ["ev_flaky"], "truth": "planted", "plant": "test_misread", "falsehood": "with the Redis lock"},
+        {"claim": "Added exponential backoff between job retries", "type": "observed", "evidence": ["ev_commit"], "truth": "planted", "plant": "invented", "falsehood": "exponential backoff"},
+        {"claim": "Kept the Redis lock as a fallback when the version check fails", "type": "observed", "evidence": ["ev_commit", "ev_abandon"], "truth": "planted", "plant": "contradicted", "falsehood": "Kept the Redis lock"},
+        {"claim": "Jobs now execute under a Redis lock with a 30s lease", "type": "observed", "evidence": ["ev_redis", "ev_commit"], "truth": "planted", "plant": "stale", "falsehood": "now execute under a Redis lock"},
+        {"claim": "A retry that sees an older version on the job row skips the job", "evidence": ["ev_reason"], "truth": "planted", "plant": "one_word", "falsehood": "older"},
+        {"claim": "The new version column defaults to 0 because CI has no Redis", "type": "observed", "evidence": ["ev_commit", "ev_reason"], "truth": "planted", "plant": "false_because", "falsehood": "defaults to 0 because"}
+      ]
+    },
+    {
+      "name": "password-hashing",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: move password hashing off bcrypt", "excerpt": "Security review flagged bcrypt's 72-byte input limit. Move to argon2id."},
+        {"id": "ev_review", "type": "review", "fact": "review: security team", "excerpt": "Passphrases longer than 72 bytes are silently truncated by bcrypt. Use argon2id with memory cost 64 MiB, 3 iterations."},
+        {"id": "ev_constraint", "type": "constraint", "fact": "constraint: existing hashes", "excerpt": "Existing bcrypt hashes must keep working. Rehash on next successful login."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/auth/hash.rs, src/auth/login.rs", "paths": ["src/auth/hash.rs", "src/auth/login.rs"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: cargo test auth::hash, 18/18 pass", "test": {"command": "cargo test auth::hash", "passed": 18, "total": 18}}
+      ],
+      "diff": [
+        {"path": "src/auth/hash.rs", "diff": "@@ -1,9 +1,28 @@\n-use bcrypt::{hash, verify, DEFAULT_COST};\n+use argon2::{Algorithm, Argon2, Params, Version};\n+use argon2::password_hash::{SaltString, rand_core::OsRng};\n+const PARAMS: (u32, u32, u32) = (64 * 1024, 3, 1); // memory KiB, iterations, lanes\n+pub fn hash_new(pw: &str) -> Result<String> {\n+    hash_argon2(pw)\n+}\n+fn hash_argon2(pw: &str) -> Result<String> {\n+    let (m, t, p) = PARAMS;\n+    let a = Argon2::new(Algorithm::Argon2id, Version::V0x13, Params::new(m, t, p, None)?);\n+    Ok(a.hash_password(pw.as_bytes(), &SaltString::generate(&mut OsRng))?.to_string())\n+}\n+pub fn verify_and_upgrade(pw: &str, stored: &str) -> Result<Option<String>> {\n+    if stored.starts_with(\"$2\") {\n+        if bcrypt::verify(pw, stored)? { return Ok(Some(hash_argon2(pw)?)); }\n+        return Err(Error::BadPassword);\n+    }\n+    if !verify_argon2(pw, stored)? { return Err(Error::BadPassword); }\n+    Ok(None)\n+}\n"},
+        {"path": "src/auth/login.rs", "diff": "@@ -30,3 +30,6 @@ pub fn login(db: &Db, user: &User, pw: &str) -> Result<Session> {\n-    if !hash::verify(pw, &user.password_hash)? { return Err(Error::BadPassword); }\n+    match hash::verify_and_upgrade(pw, &user.password_hash) {\n+        Ok(Some(new_hash)) => db.set_password_hash(user.id, &new_hash)?,\n+        Ok(None) => {}\n+        Err(_) => return Err(Error::BadPassword),\n+    }\n"}
+      ],
+      "claims": [
+        {"claim": "New passwords are hashed with argon2id at 64 MiB memory and 3 iterations", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "supported"},
+        {"claim": "bcrypt was replaced because it silently truncates passphrases longer than 72 bytes", "evidence": ["ev_review", "ev_edit"], "truth": "supported"},
+        {"claim": "Existing bcrypt hashes are rehashed with argon2id on the next successful login", "type": "observed", "evidence": ["ev_edit", "ev_constraint"], "truth": "supported"},
+        {"claim": "The argon2id hasher runs with a single lane", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "A wrong password against an old bcrypt hash is rejected with BadPassword", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The auth::hash tests passed 18 of 18", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "argon2id was chosen because it won the Password Hashing Competition", "evidence": ["ev_review"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "won the Password Hashing Competition"},
+        {"claim": "New passwords are hashed with argon2id at 64 MiB memory and 4 iterations", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "wrong_number", "falsehood": "4 iterations"},
+        {"claim": "All existing bcrypt hashes are migrated to argon2id in a one-off batch job", "type": "observed", "evidence": ["ev_edit", "ev_constraint"], "truth": "planted", "plant": "contradicted", "falsehood": "one-off batch job"},
+        {"claim": "The agent decided to rehash on login to avoid a forced password reset", "evidence": ["ev_constraint"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The agent decided"},
+        {"claim": "Existing bcrypt hashes are rehashed with argon2id on the next failed login", "type": "observed", "evidence": ["ev_edit", "ev_constraint"], "truth": "planted", "plant": "one_word", "falsehood": "failed"},
+        {"claim": "New passwords use argon2id with 64 MiB of memory, 3 iterations and a 32-byte salt, and old bcrypt hashes are upgraded at login", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "partly_false", "falsehood": "32-byte salt"},
+        {"claim": "bcrypt truncated passphrases over 72 bytes, which prompted the switch", "evidence": ["ev_constraint"], "truth": "planted", "plant": "wrong_citation", "falsehood": "72 bytes"}
+      ]
+    },
+    {
+      "name": "cache-layer",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: cut p95 latency of /search", "excerpt": "p95 for /search is 1.8s. Target under 500ms."},
+        {"id": "ev_redis", "type": "attempt", "fact": "edit: src/search/redis_cache.ts", "paths": ["src/search/redis_cache.ts"]},
+        {"id": "ev_reject", "type": "review", "fact": "review: platform team", "excerpt": "No new services for this. Keep it in-process."},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: Redis cache", "excerpt": "Review said no new services, removing the Redis cache."},
+        {"id": "ev_lru", "type": "decision", "fact": "decision: in-process LRU", "excerpt": "Use an in-process LRU with 10,000 entries and a 60s TTL per instance."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/search/cache.ts", "paths": ["src/search/cache.ts"]},
+        {"id": "ev_bench", "type": "test", "fact": "test: npm run bench:search, 12/12 pass", "test": {"command": "npm run bench:search", "passed": 12, "total": 12}}
+      ],
+      "diff": [
+        {"path": "src/search/cache.ts", "diff": "@@ -0,0 +1,2 @@\n+import { LRUCache } from 'lru-cache';\n+export const searchCache = new LRUCache<string, Result[]>({ max: 10_000, ttl: 60_000 });\n"}
+      ],
+      "claims": [
+        {"claim": "Search results are cached in an in-process LRU of 10,000 entries with a 60s TTL", "type": "observed", "evidence": ["ev_edit", "ev_lru"], "truth": "supported"},
+        {"section": "rejected", "claim": "A Redis cache was tried and removed because review asked for no new services", "type": "observed", "evidence": ["ev_redis", "ev_abandon", "ev_reject"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The search benchmark suite passed 12 of 12 checks", "type": "observed", "evidence": ["ev_bench"], "truth": "supported"},
+        {"claim": "Cached search results expire after one minute", "type": "observed", "evidence": ["ev_edit", "ev_lru"], "truth": "supported"},
+        {"claim": "The search cache holds at most ten thousand entries", "type": "observed", "evidence": ["ev_edit", "ev_lru"], "truth": "supported"},
+        {"claim": "Each instance keeps its own cache", "evidence": ["ev_lru"], "truth": "supported"},
+        {"claim": "Search results are cached in Redis with a 60s TTL", "type": "observed", "evidence": ["ev_redis", "ev_lru"], "truth": "planted", "plant": "rejected_as_implemented", "falsehood": "cached in Redis"},
+        {"claim": "The cache brought p95 latency of /search under 500ms", "type": "observed", "evidence": ["ev_bench", "ev_goal"], "truth": "planted", "plant": "overreach", "falsehood": "under 500ms"},
+        {"claim": "The cache is shared across all instances", "type": "observed", "evidence": ["ev_edit", "ev_lru"], "truth": "planted", "plant": "contradicted", "falsehood": "shared across all instances"},
+        {"section": "rejected", "claim": "A Redis cache was removed because it was too slow", "type": "observed", "evidence": ["ev_redis", "ev_abandon"], "truth": "planted", "plant": "wrong_reason", "falsehood": "too slow"},
+        {"claim": "The search cache lives in src/search/redis_cache.ts", "type": "observed", "evidence": ["ev_redis", "ev_edit"], "truth": "planted", "plant": "stale", "falsehood": "redis_cache.ts"},
+        {"claim": "Review asked to keep the cache out-of-process", "evidence": ["ev_reject"], "truth": "planted", "plant": "one_word", "falsehood": "out-of-process"},
+        {"claim": "The LRU holds 10,000 entries because p95 for /search was 1.8s", "evidence": ["ev_lru", "ev_goal"], "truth": "planted", "plant": "false_because", "falsehood": "10,000 entries because p95"}
+      ]
+    },
+    {
+      "name": "rate-limit",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: rate-limit the public login endpoint", "excerpt": "Credential stuffing on /login. Add a rate limit there."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: token bucket", "excerpt": "Token bucket per IP: 10 requests per minute, burst of 5, on /login only."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/http/ratelimit.go, src/http/routes.go", "paths": ["src/http/ratelimit.go", "src/http/routes.go"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: go test ./src/http/..., 31/32 pass", "test": {"command": "go test ./src/http/...", "passed": 31, "total": 32}}
+      ],
+      "diff": [
+        {"path": "src/http/routes.go", "diff": "@@ -40,3 +40,3 @@\n-\tr.Post(\"/login\", login)\n+\tr.With(RateLimit(10, time.Minute, 5)).Post(\"/login\", login)\n"},
+        {"path": "src/http/ratelimit.go", "diff": "@@ -0,0 +1,30 @@\n+// RateLimit is a per-IP token bucket.\n+func RateLimit(n int, per time.Duration, burst int) func(http.Handler) http.Handler {\n"}
+      ],
+      "claims": [
+        {"claim": "Added a per-IP token bucket of 10 requests per minute with a burst of 5 on /login", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The HTTP test suite passed 31 of 32 tests", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "Login requests are limited per client IP address", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "The rate limit was added because of credential stuffing on /login", "evidence": ["ev_goal", "ev_edit"], "truth": "supported"},
+        {"claim": "Added a per-IP token bucket to every public endpoint", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "overreach", "falsehood": "every public endpoint"},
+        {"section": "evidence_summary", "claim": "The HTTP test suite passed", "type": "observed", "evidence": ["ev_tests"], "truth": "planted", "plant": "test_misread", "falsehood": "The HTTP test suite passed"},
+        {"claim": "The limit is per user account, so shared office IPs are not blocked", "type": "observed", "evidence": ["ev_decision"], "truth": "planted", "plant": "contradicted", "falsehood": "per user account"},
+        {"claim": "Each IP gets 10 login requests per minute with a burst of 10", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "wrong_number", "falsehood": "burst of 10"},
+        {"section": "evidence_summary", "claim": "One HTTP test failed, and it was a rate-limit test", "type": "observed", "evidence": ["ev_tests", "ev_edit"], "truth": "planted", "plant": "test_misread", "falsehood": "it was a rate-limit test"},
+        {"claim": "The token bucket allows 10 requests per minute per IP", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_citation", "falsehood": "10 requests per minute"}
+      ]
+    },
+    {
+      "name": "date-parsing",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: fix invoice dates off by one day", "excerpt": "Invoices for customers in UTC-5 show the previous day."},
+        {"id": "ev_reason", "type": "reason", "fact": "reason: store dates, not timestamps", "excerpt": "Invoice dates are calendar dates. Parsing them as UTC midnight shifts them for negative offsets. Store and send them as plain YYYY-MM-DD strings."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/invoices/serialize.py", "paths": ["src/invoices/serialize.py"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: pytest tests/invoices, 64/64 pass", "test": {"command": "pytest tests/invoices", "passed": 64, "total": 64}}
+      ],
+      "diff": [
+        {"path": "src/invoices/serialize.py", "diff": "@@ -22,2 +22,2 @@\n-    \"date\": invoice.date.isoformat() + \"T00:00:00Z\",\n+    \"date\": invoice.date.isoformat(),\n"}
+      ],
+      "claims": [
+        {"claim": "Invoice dates are now serialized as plain YYYY-MM-DD strings instead of UTC midnight timestamps", "type": "observed", "evidence": ["ev_edit", "ev_reason"], "truth": "supported"},
+        {"claim": "Calendar dates parsed as UTC midnight shifted to the previous day for customers with negative UTC offsets", "evidence": ["ev_reason", "ev_goal"], "truth": "supported"},
+        {"claim": "The serializer no longer appends a T00:00:00Z time to invoice dates", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The invoice tests passed 64 of 64", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "Invoice dates are now stored in the customer's local time zone", "type": "observed", "evidence": ["ev_edit", "ev_reason"], "truth": "planted", "plant": "contradicted", "falsehood": "customer's local time zone"},
+        {"claim": "The database column was changed from TIMESTAMP to DATE", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "from TIMESTAMP to DATE"},
+        {"section": "evidence_summary", "claim": "The invoice suite passed 64 of 64 tests, including new tests for UTC-5", "type": "observed", "evidence": ["ev_tests"], "truth": "planted", "plant": "overreach", "falsehood": "including new tests for UTC-5"},
+        {"claim": "Invoices for customers in UTC-5 showed the next day", "evidence": ["ev_goal"], "truth": "planted", "plant": "one_word", "falsehood": "next day"},
+        {"claim": "Invoice dates are sent as YYYY-MM-DD strings because the invoice suite passed 64 of 64 tests", "type": "observed", "evidence": ["ev_edit", "ev_tests"], "truth": "planted", "plant": "false_because", "falsehood": "strings because the invoice suite passed"},
+        {"claim": "The security team asked to store invoice dates as plain strings", "evidence": ["ev_reason"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The security team asked"}
+      ]
+    },
+    {
+      "name": "feature-flag-removal",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: remove the new_checkout flag", "excerpt": "new_checkout has been at 100% for six weeks. Remove the flag and the old path."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/checkout/index.tsx, src/checkout/legacy.tsx, src/flags.ts", "paths": ["src/checkout/index.tsx", "src/checkout/legacy.tsx", "src/flags.ts"]},
+        {"id": "ev_note", "type": "decision", "fact": "decision: keep legacy receipt template", "excerpt": "Keep templates/receipt_legacy.html. Finance still emails it for refunds."}
+      ],
+      "diff": [
+        {"path": "src/checkout/legacy.tsx", "diff": "@@ -1,140 +0,0 @@\n-export function LegacyCheckout() {\n"},
+        {"path": "src/flags.ts", "diff": "@@ -8,1 +7,0 @@\n-  new_checkout: { rollout: 100 },\n"},
+        {"path": "src/checkout/index.tsx", "diff": "@@ -3,5 +3,1 @@\n-  return flags.new_checkout ? <Checkout /> : <LegacyCheckout />;\n+  return <Checkout />;\n"}
+      ],
+      "claims": [
+        {"claim": "Removed the new_checkout flag and the legacy checkout component", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "The legacy receipt template was kept because finance still emails it for refunds", "evidence": ["ev_note"], "truth": "supported"},
+        {"claim": "The checkout page now always renders the new Checkout component", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "new_checkout had been at 100% rollout for six weeks when it was removed", "evidence": ["ev_goal", "ev_edit"], "truth": "supported"},
+        {"claim": "Removed the legacy receipt template along with the old checkout", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "contradicted", "falsehood": "Removed the legacy receipt template"},
+        {"claim": "The flag was removed after it had been at 100% for three months", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_number", "falsehood": "three months"},
+        {"claim": "The flag was removed because flags left behind are a common source of bugs", "evidence": ["ev_goal"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "common source of bugs"},
+        {"claim": "Removed the new_checkout flag and LegacyCheckout, and added a test that checkout always renders the new component", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "partly_false", "falsehood": "added a test"}
+      ]
+    },
+    {
+      "name": "http-client-swap",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: drop OkHttp from the billing client", "excerpt": "The billing service pulls in OkHttp only for one client. Use the JDK's built-in HttpClient instead."},
+        {"id": "ev_reason", "type": "reason", "fact": "reason: fewer dependencies", "excerpt": "We run Java 21, which ships java.net.http. Dropping OkHttp removes two transitive jars and the Kotlin stdlib from the classpath."},
+        {"id": "ev_async", "type": "attempt", "fact": "edit: billing/src/main/java/billing/BillingClient.java (sendAsync)", "paths": ["billing/src/main/java/billing/BillingClient.java"]},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: async client", "excerpt": "sendAsync made every caller deal with CompletableFuture. All callers are synchronous; switching back to send()."},
+        {"id": "ev_review", "type": "review", "fact": "review: payments team", "excerpt": "Keep the same timeouts as before: 5s to connect, 30s per request."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: billing/src/main/java/billing/BillingClient.java, billing/build.gradle", "paths": ["billing/src/main/java/billing/BillingClient.java", "billing/build.gradle"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: ./gradlew :billing:test, 87/87 pass", "test": {"command": "./gradlew :billing:test", "passed": 87, "total": 87}}
+      ],
+      "diff": [
+        {"path": "billing/build.gradle", "diff": "@@ -12,7 +12,6 @@ dependencies {\n     implementation project(':common')\n-    implementation 'com.squareup.okhttp3:okhttp:4.12.0'\n     implementation 'com.fasterxml.jackson.core:jackson-databind:2.17.2'\n"},
+        {"path": "billing/src/main/java/billing/BillingClient.java", "diff": "@@ -1,40 +1,42 @@\n-import okhttp3.OkHttpClient;\n-import okhttp3.Request;\n-import okhttp3.Response;\n-import java.util.concurrent.TimeUnit;\n+import java.net.URI;\n+import java.net.http.HttpClient;\n+import java.net.http.HttpRequest;\n+import java.net.http.HttpResponse;\n+import java.time.Duration;\n \n public class BillingClient {\n-    private final OkHttpClient http = new OkHttpClient.Builder()\n-        .connectTimeout(5, TimeUnit.SECONDS)\n-        .callTimeout(30, TimeUnit.SECONDS)\n-        .build();\n+    private static final Duration REQUEST_TIMEOUT = Duration.ofMillis(30_000);\n+    private final HttpClient http = HttpClient.newBuilder()\n+        .connectTimeout(Duration.ofSeconds(5))\n+        .build();\n \n-    public Invoice invoice(String id) throws IOException {\n-        Request req = new Request.Builder().url(base + \"/invoices/\" + id).build();\n-        try (Response res = http.newCall(req).execute()) {\n-            return parse(res.body().string());\n-        }\n+    public Invoice invoice(String id) throws IOException, InterruptedException {\n+        HttpRequest req = HttpRequest.newBuilder(URI.create(base + \"/invoices/\" + id))\n+            .timeout(REQUEST_TIMEOUT)\n+            .GET()\n+            .build();\n+        HttpResponse<String> res = http.send(req, HttpResponse.BodyHandlers.ofString());\n+        return parse(res.body());\n     }\n"}
+      ],
+      "claims": [
+        {"claim": "BillingClient now uses the JDK's java.net.http HttpClient instead of OkHttp", "type": "observed", "evidence": ["ev_edit", "ev_goal"], "truth": "supported"},
+        {"claim": "The OkHttp dependency was removed from the billing build", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "Billing requests time out after 30 seconds", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "supported"},
+        {"claim": "OkHttp was dropped to take two transitive jars and the Kotlin stdlib off the classpath", "evidence": ["ev_reason", "ev_edit"], "truth": "supported"},
+        {"section": "rejected", "claim": "An async version built on sendAsync was dropped because every caller is synchronous", "type": "observed", "evidence": ["ev_async", "ev_abandon"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The billing tests passed 87 of 87", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "BillingClient.invoice now returns a CompletableFuture", "type": "observed", "evidence": ["ev_async", "ev_edit"], "truth": "planted", "plant": "stale", "falsehood": "returns a CompletableFuture"},
+        {"claim": "The platform team asked to keep the 5s connect and 30s request timeouts", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The platform team asked"},
+        {"claim": "OkHttp was dropped because the JDK client supports HTTP/2", "evidence": ["ev_reason"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "supports HTTP/2"},
+        {"claim": "The connect timeout was raised to 5 seconds", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "one_word", "falsehood": "raised"},
+        {"claim": "BillingClient calls the blocking send() because the payments team asked for 30s request timeouts", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "false_because", "falsehood": "send() because the payments team"}
+      ]
+    },
+    {
+      "name": "orders-index-migration",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: speed up the customer order history page", "excerpt": "GET /customers/:id/orders takes 2.3s at p95. The query filters orders by customer_id and sorts by created_at."},
+        {"id": "ev_plain", "type": "attempt", "fact": "edit: db/migrate/20261012_add_orders_customer_index.rb (plain add_index)", "paths": ["db/migrate/20261012_add_orders_customer_index.rb"]},
+        {"id": "ev_review", "type": "review", "fact": "review: DBA", "excerpt": "A plain add_index locks orders against writes for the whole build, about 20 minutes on production. Build it concurrently."},
+        {"id": "ev_constraint", "type": "constraint", "fact": "constraint: concurrent index", "excerpt": "A concurrent index build cannot run inside a transaction, so the migration must disable the DDL transaction."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: db/migrate/20261012_add_orders_customer_index.rb", "paths": ["db/migrate/20261012_add_orders_customer_index.rb"]},
+        {"id": "ev_perf", "type": "test", "fact": "test: bin/rails test test/perf/order_history_test.rb, 4/4 pass", "excerpt": "Staging p95 for the order history query went from 2.3s to 140ms.", "test": {"command": "bin/rails test test/perf/order_history_test.rb", "passed": 4, "total": 4}}
+      ],
+      "diff": [
+        {"path": "db/migrate/20261012_add_orders_customer_index.rb", "diff": "@@ -0,0 +1,7 @@\n+class AddOrdersCustomerIndex < ActiveRecord::Migration[7.1]\n+  disable_ddl_transaction!\n+\n+  def change\n+    add_index :orders, [:customer_id, :created_at], algorithm: :concurrently\n+  end\n+end\n"}
+      ],
+      "claims": [
+        {"claim": "Added a composite index on orders (customer_id, created_at)", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "The index is built concurrently because a plain add_index would lock orders against writes for about 20 minutes", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "supported"},
+        {"claim": "The migration turns off its DDL transaction, since a concurrent index build cannot run inside one", "type": "observed", "evidence": ["ev_edit", "ev_constraint"], "truth": "supported"},
+        {"section": "rejected", "claim": "A first version used a plain add_index; the DBA asked for a concurrent build instead", "type": "observed", "evidence": ["ev_plain", "ev_review"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "On staging, p95 for the order history query fell from 2.3s to 140ms", "type": "observed", "evidence": ["ev_perf"], "truth": "supported"},
+        {"claim": "A plain add_index would have locked orders against writes for about 40 minutes", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_number", "falsehood": "40 minutes"},
+        {"section": "evidence_summary", "claim": "The order history page now loads in 140ms in production", "type": "observed", "evidence": ["ev_perf", "ev_goal"], "truth": "planted", "plant": "overreach", "falsehood": "page now loads"},
+        {"claim": "The migration adds the index with a plain add_index inside its transaction", "type": "observed", "evidence": ["ev_plain", "ev_edit"], "truth": "planted", "plant": "rejected_as_implemented", "falsehood": "with a plain add_index"},
+        {"claim": "A concurrent index build cannot run inside a transaction", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_citation", "falsehood": "cannot run inside a transaction"},
+        {"section": "evidence_summary", "claim": "The order history perf tests passed 4 of 4 with p95 under 100ms", "type": "observed", "evidence": ["ev_perf"], "truth": "planted", "plant": "test_misread", "falsehood": "under 100ms"}
+      ]
+    },
+    {
+      "name": "invoice-list-n-plus-one",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: fix slow admin invoice list", "excerpt": "The admin invoice list makes one query per invoice to load its line items: 401 queries for 400 invoices."},
+        {"id": "ev_reason", "type": "reason", "fact": "reason: eager load", "excerpt": "Use includes(:line_items) so Rails loads all line items in one extra query. preload would also work, but includes leaves room to filter on line items later."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: app/controllers/admin/invoices_controller.rb, app/views/admin/invoices/index.html.erb", "paths": ["app/controllers/admin/invoices_controller.rb", "app/views/admin/invoices/index.html.erb"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: bin/rails test test/controllers/admin, 23/23 pass", "test": {"command": "bin/rails test test/controllers/admin", "passed": 23, "total": 23}},
+        {"id": "ev_bullet", "type": "test", "fact": "test: bullet N+1 check on admin/invoices, 1/1 pass", "excerpt": "Bullet reports no N+1 queries. Queries for 400 invoices: 401 before, 2 after.", "test": {"command": "bullet N+1 check on admin/invoices", "passed": 1, "total": 1}}
+      ],
+      "diff": [
+        {"path": "app/controllers/admin/invoices_controller.rb", "diff": "@@ -4,3 +4,3 @@ class Admin::InvoicesController < AdminController\n   def index\n-    @invoices = Invoice.order(created_at: :desc).limit(400)\n+    @invoices = Invoice.includes(:line_items).order(created_at: :desc).limit(400)\n   end\n"},
+        {"path": "app/views/admin/invoices/index.html.erb", "diff": "@@ -12,3 +12,3 @@\n       <td><%= invoice.number %></td>\n-      <td><%= invoice.line_items.count %></td>\n+      <td><%= invoice.line_items.size %></td>\n"}
+      ],
+      "claims": [
+        {"claim": "The admin invoice list now eager-loads line items with includes(:line_items)", "type": "observed", "evidence": ["ev_edit", "ev_reason"], "truth": "supported"},
+        {"claim": "includes was picked over preload to leave room for filtering on line items later", "evidence": ["ev_reason"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "Loading 400 invoices now takes 2 queries instead of 401", "type": "observed", "evidence": ["ev_bullet"], "truth": "supported"},
+        {"claim": "The view counts line items with size instead of count", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The admin controller tests passed 23 of 23", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "includes was picked over preload because it is faster", "evidence": ["ev_reason"], "truth": "planted", "plant": "wrong_reason", "falsehood": "faster"},
+        {"claim": "The view uses size because count would still run one SQL query per invoice", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "would still run one SQL query per invoice"},
+        {"claim": "Loading 400 invoices used to take 4,001 queries", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_number", "falsehood": "4,001"},
+        {"claim": "Added a database index on line_items.invoice_id", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "index on line_items.invoice_id"},
+        {"claim": "Rails loads all line items in one extra query because the list is ordered by created_at", "type": "observed", "evidence": ["ev_edit", "ev_reason"], "truth": "planted", "plant": "false_because", "falsehood": "query because the list is ordered"}
+      ]
+    },
+    {
+      "name": "report-worker-memory",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: stop OOM kills in the report worker", "excerpt": "report-worker pods are OOMKilled during month-end exports. Peak RSS measured at 780Mi against a 512Mi limit."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: raise memory, not CPU", "excerpt": "Raise the memory limit to 1Gi and the request to 768Mi so the scheduler places pods where that memory exists. Leave CPU as is; the worker is not CPU-bound."},
+        {"id": "ev_review", "type": "review", "fact": "review: SRE", "excerpt": "Fine with 1Gi. Do not add an HPA in this change; month-end load is predictable and we scale by hand."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: deploy/report-worker/deployment.yaml", "paths": ["deploy/report-worker/deployment.yaml"]},
+        {"id": "ev_replay", "type": "test", "fact": "test: month-end export replay on staging, 3/3 pass", "excerpt": "Three replays of October's export finished with no OOMKilled pods. Peak RSS 790Mi.", "test": {"command": "month-end export replay on staging", "passed": 3, "total": 3}}
+      ],
+      "diff": [
+        {"path": "deploy/report-worker/deployment.yaml", "diff": "@@ -24,8 +24,8 @@ spec:\n           resources:\n             requests:\n               cpu: 500m\n-              memory: 256Mi\n+              memory: 768Mi\n             limits:\n               cpu: \"1\"\n-              memory: 512Mi\n+              memory: 1Gi\n"}
+      ],
+      "claims": [
+        {"claim": "Raised the report worker's memory limit from 512Mi to 1Gi", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "The memory request went from 256Mi to 768Mi so the scheduler places pods where that memory exists", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "CPU requests and limits were left unchanged because the worker is not CPU-bound", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "Peak memory had reached 780Mi against the old 512Mi limit", "evidence": ["ev_goal"], "truth": "supported"},
+        {"claim": "The memory limit doubled", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "Three replays of October's month-end export on staging ran with no OOMKilled pods", "type": "observed", "evidence": ["ev_replay"], "truth": "supported"},
+        {"claim": "Added a HorizontalPodAutoscaler for the report worker", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "contradicted", "falsehood": "Added a HorizontalPodAutoscaler"},
+        {"claim": "The SRE reviewer chose to leave CPU unchanged", "evidence": ["ev_decision", "ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The SRE reviewer chose"},
+        {"section": "evidence_summary", "claim": "Peak memory in the staging replays stayed under 768Mi", "type": "observed", "evidence": ["ev_replay"], "truth": "planted", "plant": "test_misread", "falsehood": "under 768Mi"},
+        {"claim": "The memory request was lowered to 768Mi", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "one_word", "falsehood": "lowered"},
+        {"claim": "Raised the memory limit to 1Gi, set the memory request to 768Mi, and raised the CPU limit to 2 cores", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "partly_false", "falsehood": "raised the CPU limit to 2 cores"}
+      ]
+    },
+    {
+      "name": "ci-cargo-cache",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: cut CI time for the Rust workspace", "excerpt": "CI takes 14 minutes, mostly rebuilding dependencies from scratch on every run."},
+        {"id": "ev_sccache", "type": "attempt", "fact": "edit: .github/workflows/ci.yml (sccache with S3 backend)", "paths": [".github/workflows/ci.yml"]},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: sccache", "excerpt": "sccache needs S3 credentials, and fork PRs do not get secrets, so their builds failed. Removing it."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: actions/cache", "excerpt": "Cache ~/.cargo/registry, ~/.cargo/git and target/ with actions/cache, keyed on the OS and the hash of Cargo.lock."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: .github/workflows/ci.yml", "paths": [".github/workflows/ci.yml"]},
+        {"id": "ev_runs", "type": "test", "fact": "test: CI workflow on 10 PRs, 10/10 pass", "excerpt": "Median run time over 10 PRs: 6 minutes with a warm cache.", "test": {"command": "CI workflow on 10 PRs", "passed": 10, "total": 10}}
+      ],
+      "diff": [
+        {"path": ".github/workflows/ci.yml", "diff": "@@ -18,6 +18,14 @@ jobs:\n     steps:\n       - uses: actions/checkout@v4\n+      - uses: actions/cache@v4\n+        with:\n+          path: |\n+            ~/.cargo/registry\n+            ~/.cargo/git\n+            target\n+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}\n+          restore-keys: ${{ runner.os }}-cargo-\n       - run: cargo test --workspace\n"}
+      ],
+      "claims": [
+        {"claim": "CI now caches the Cargo registry, Cargo git checkouts and target/ with actions/cache", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "Any change to Cargo.lock produces a new cache key", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "rejected", "claim": "sccache with an S3 backend was dropped because fork PRs get no secrets and their builds failed", "type": "observed", "evidence": ["ev_sccache", "ev_abandon"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "Median CI time over 10 PRs was 6 minutes with a warm cache, down from 14", "type": "observed", "evidence": ["ev_runs", "ev_goal"], "truth": "supported"},
+        {"claim": "Compiled artifacts are shared between CI runs through sccache", "type": "observed", "evidence": ["ev_sccache", "ev_edit"], "truth": "planted", "plant": "stale", "falsehood": "through sccache"},
+        {"section": "rejected", "claim": "sccache was dropped because it slowed builds down", "evidence": ["ev_abandon"], "truth": "planted", "plant": "wrong_reason", "falsehood": "slowed builds down"},
+        {"section": "evidence_summary", "claim": "Every CI run now takes 6 minutes", "type": "observed", "evidence": ["ev_runs"], "truth": "planted", "plant": "overreach", "falsehood": "Every CI run"},
+        {"claim": "The cache key includes a hash of Cargo.lock", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_citation", "falsehood": "hash of Cargo.lock"},
+        {"claim": "CI caches ~/.cargo/registry, ~/.cargo/git and target/, keyed on the OS and the Rust toolchain version", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "partly_false", "falsehood": "Rust toolchain version"}
+      ]
+    },
+    {
+      "name": "csv-export-streaming",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: stop OOM on large CSV exports", "excerpt": "Exporting an account with 2 million transactions runs the API pod out of memory: the export builds the whole CSV in a String first."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: stream rows", "excerpt": "Stream rows from the database to the response in pages of 500, writing each page as it arrives. Memory stays flat no matter how many rows."},
+        {"id": "ev_review", "type": "review", "fact": "review: tech lead", "excerpt": "Keep the column order exactly as before; finance's import script depends on it."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/main/kotlin/export/CsvExport.kt", "paths": ["src/main/kotlin/export/CsvExport.kt"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: ./gradlew test --tests *CsvExport*, 14/14 pass", "test": {"command": "./gradlew test --tests *CsvExport*", "passed": 14, "total": 14}},
+        {"id": "ev_load", "type": "test", "fact": "test: export load test, 1/1 pass", "excerpt": "Export of 2,000,000 rows finished in 41s; heap peaked at 180 MB.", "test": {"command": "export load test", "passed": 1, "total": 1}}
+      ],
+      "diff": [
+        {"path": "src/main/kotlin/export/CsvExport.kt", "diff": "@@ -18,10 +18,24 @@ class CsvExport(private val repo: TransactionRepo) {\n-    fun export(accountId: Long): String {\n-        val rows = repo.findAll(accountId)\n-        val sb = StringBuilder(HEADER).append('\\n')\n-        for (r in rows) sb.append(r.toCsv()).append('\\n')\n-        return sb.toString()\n-    }\n+    fun export(accountId: Long, out: Writer) {\n+        out.write(HEADER)\n+        out.write(\"\\n\")\n+        var page = 0\n+        while (true) {\n+            val rows = repo.findPage(accountId, page, PAGE_SIZE)\n+            if (rows.isEmpty()) break\n+            for (r in rows) {\n+                out.write(r.toCsv())\n+                out.write(\"\\n\")\n+            }\n+            out.flush()\n+            page++\n+        }\n+    }\n+\n+    companion object {\n+        const val PAGE_SIZE = 500\n+    }\n"}
+      ],
+      "claims": [
+        {"claim": "CSV exports now write rows to a Writer in pages of 500 instead of building the whole file in memory", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "The export flushes the writer after every page", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "The column order was left as it was because finance's import script depends on it", "evidence": ["ev_review", "ev_edit"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "A load test exported two million rows in 41 seconds, with heap peaking at 180 MB", "type": "observed", "evidence": ["ev_load"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The CsvExport tests passed 14 of 14", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "Rows are fetched in pages of 5,000", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "wrong_number", "falsehood": "5,000"},
+        {"claim": "Exports are now compressed with gzip as they stream", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "gzip"},
+        {"claim": "With streaming, memory grows with the number of rows exported", "evidence": ["ev_decision"], "truth": "planted", "plant": "one_word", "falsehood": "grows"},
+        {"section": "evidence_summary", "claim": "The load test exported 2,000,000 rows in under 30s", "type": "observed", "evidence": ["ev_load"], "truth": "planted", "plant": "test_misread", "falsehood": "under 30s"},
+        {"claim": "Finance asked to keep the CSV column order unchanged", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "Finance asked"},
+        {"claim": "Rows are written in pages of 500 because finance's import script depends on the column order", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "false_because", "falsehood": "500 because finance's import script"}
+      ]
+    },
+    {
+      "name": "token-lifetime",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: shorten access token lifetime", "excerpt": "Access tokens live 24 hours, so a stolen token works for a day. Shorten them and rotate refresh tokens."},
+        {"id": "ev_review", "type": "review", "fact": "review: security team", "excerpt": "Access tokens: 15 minutes. Refresh tokens: rotate on every use and revoke the old one, so a replayed refresh token is detected."},
+        {"id": "ev_sliding", "type": "attempt", "fact": "edit: src/auth/tokens.ts (sliding expiry)", "paths": ["src/auth/tokens.ts"]},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: sliding expiry", "excerpt": "Sliding expiry kept extending a stolen token as long as it was used. Dropped in favor of short tokens plus refresh rotation."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/auth/tokens.ts, src/auth/refresh.ts", "paths": ["src/auth/tokens.ts", "src/auth/refresh.ts"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: npm test -- auth, 42/42 pass", "test": {"command": "npm test -- auth", "passed": 42, "total": 42}}
+      ],
+      "diff": [
+        {"path": "src/auth/tokens.ts", "diff": "@@ -3,1 +3,1 @@\n-export const ACCESS_TTL_SECONDS = 24 * 60 * 60;\n+export const ACCESS_TTL_SECONDS = 15 * 60;\n"},
+        {"path": "src/auth/refresh.ts", "diff": "@@ -0,0 +1,10 @@\n+export async function refresh(oldToken: string): Promise<TokenPair> {\n+  const row = await db.refreshTokens.findByHash(hash(oldToken));\n+  if (!row) throw new AuthError('unknown refresh token');\n+  if (row.revokedAt) {\n+    await db.refreshTokens.revokeFamily(row.familyId);\n+    throw new AuthError('refresh token reused');\n+  }\n+  await db.refreshTokens.revoke(row.id);\n+  return issuePair(row.userId, row.familyId);\n+}\n"}
+      ],
+      "claims": [
+        {"claim": "Access tokens now expire after 15 minutes instead of 24 hours", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "Each refresh revokes the refresh token it used and issues a new pair", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "supported"},
+        {"claim": "Reusing a revoked refresh token revokes its whole token family", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "rejected", "claim": "Sliding expiry was dropped because it kept extending a stolen token as long as it was used", "type": "observed", "evidence": ["ev_sliding", "ev_abandon"], "truth": "supported"},
+        {"claim": "The security team asked for refresh rotation so that a replayed refresh token is detected", "evidence": ["ev_review"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The auth tests passed 42 of 42", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "Access tokens now expire after 30 minutes", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "wrong_number", "falsehood": "30 minutes"},
+        {"claim": "Access tokens use sliding expiry, extended each time they are used", "type": "observed", "evidence": ["ev_sliding", "ev_edit"], "truth": "planted", "plant": "rejected_as_implemented", "falsehood": "use sliding expiry"},
+        {"claim": "Reusing a revoked refresh token restores its whole token family", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "one_word", "falsehood": "restores"},
+        {"claim": "The 15 minute lifetime follows the OWASP recommendation for access tokens", "evidence": ["ev_review"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "OWASP"},
+        {"section": "rejected", "claim": "Sliding expiry kept extending a stolen token for as long as it was used", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_citation", "falsehood": "kept extending a stolen token"}
+      ]
+    },
+    {
+      "name": "search-sql-injection",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: fix SQL injection in product search", "excerpt": "Pentest report: the q parameter of /search is concatenated into SQL. The payload ' OR 1=1 -- returns every product, including unpublished ones."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: prepared statements", "excerpt": "Use PDO prepared statements with a bound parameter. Do not try to escape the input by hand."},
+        {"id": "ev_escape", "type": "attempt", "fact": "edit: src/Search/ProductSearch.php (addslashes)", "paths": ["src/Search/ProductSearch.php"]},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: escaping", "excerpt": "addslashes does not cover multibyte charsets; the reviewer asked for bound parameters instead."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/Search/ProductSearch.php, tests/Search/ProductSearchTest.php", "paths": ["src/Search/ProductSearch.php", "tests/Search/ProductSearchTest.php"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: vendor/bin/phpunit tests/Search, 9/9 pass", "test": {"command": "vendor/bin/phpunit tests/Search", "passed": 9, "total": 9}}
+      ],
+      "diff": [
+        {"path": "src/Search/ProductSearch.php", "diff": "@@ -14,4 +14,7 @@ final class ProductSearch\n     public function find(string $q): array\n     {\n-        $sql = \"SELECT id, name, price FROM products WHERE published = 1 AND name LIKE '%\" . $q . \"%'\";\n-        return $this->db->query($sql)->fetchAll();\n+        $stmt = $this->db->prepare(\n+            \"SELECT id, name, price FROM products WHERE published = 1 AND name LIKE :q\"\n+        );\n+        $stmt->execute([':q' => '%' . $q . '%']);\n+        return $stmt->fetchAll();\n     }\n"},
+        {"path": "tests/Search/ProductSearchTest.php", "diff": "@@ -40,0 +40,5 @@\n+    public function testInjectionPayloadMatchesNothing(): void\n+    {\n+        $this->assertSame([], $this->search->find(\"' OR 1=1 --\"));\n+    }\n+\n"}
+      ],
+      "claims": [
+        {"claim": "Product search now binds the query text as a PDO parameter instead of concatenating it into SQL", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "Search still returns only published products", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "rejected", "claim": "Escaping with addslashes was dropped because it does not cover multibyte charsets", "type": "observed", "evidence": ["ev_escape", "ev_abandon"], "truth": "supported"},
+        {"claim": "A new test checks that the payload ' OR 1=1 -- finds no products", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The search tests passed 9 of 9", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "The q parameter is escaped with addslashes before it reaches SQL", "type": "observed", "evidence": ["ev_escape", "ev_edit"], "truth": "planted", "plant": "rejected_as_implemented", "falsehood": "escaped with addslashes"},
+        {"claim": "Every query in the codebase now uses prepared statements", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "overreach", "falsehood": "Every query in the codebase"},
+        {"claim": "The pentest report asked for bound parameters instead of escaping", "evidence": ["ev_abandon", "ev_goal"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The pentest report asked"},
+        {"claim": "Search now uses a prepared statement, still filters to published products, and limits results to 50 rows", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "partly_false", "falsehood": "limits results to 50 rows"},
+        {"section": "evidence_summary", "claim": "The search tests passed 9 of 9 on the addslashes version", "type": "observed", "evidence": ["ev_tests", "ev_escape"], "truth": "planted", "plant": "test_misread", "falsehood": "on the addslashes version"}
+      ]
+    },
+    {
+      "name": "flaky-session-test",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: fix flaky session expiry test", "excerpt": "TestSessionExpires fails about one run in twelve on CI. It sleeps 1s and expects a 1s session to be gone."},
+        {"id": "ev_reason", "type": "reason", "fact": "reason: fake clock", "excerpt": "The test races the real clock. Inject a fake clock and advance it past the expiry instead of sleeping. No change to production code."},
+        {"id": "ev_before", "type": "test", "fact": "test: go test -run TestSessionExpires -count=200 ./session, 183/200 pass", "test": {"command": "go test -run TestSessionExpires -count=200 ./session", "passed": 183, "total": 200}},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: session/store_test.go", "paths": ["session/store_test.go"]},
+        {"id": "ev_after", "type": "test", "fact": "test: go test -run TestSessionExpires -count=200 ./session, 200/200 pass", "test": {"command": "go test -run TestSessionExpires -count=200 ./session", "passed": 200, "total": 200}}
+      ],
+      "diff": [
+        {"path": "session/store_test.go", "diff": "@@ -8,9 +8,16 @@ import (\n func TestSessionExpires(t *testing.T) {\n-\ts := NewStore(time.Now)\n+\tclock := &fakeClock{now: time.Unix(1_700_000_000, 0)}\n+\ts := NewStore(clock.Now)\n \tid := s.Create(time.Second)\n-\ttime.Sleep(time.Second)\n+\tclock.Advance(1001 * time.Millisecond)\n \tif s.Valid(id) {\n \t\tt.Fatal(\"session still valid after expiry\")\n \t}\n }\n+\n+type fakeClock struct{ now time.Time }\n+\n+func (c *fakeClock) Now() time.Time          { return c.now }\n+func (c *fakeClock) Advance(d time.Duration) { c.now = c.now.Add(d) }\n"}
+      ],
+      "claims": [
+        {"claim": "TestSessionExpires now advances a fake clock instead of sleeping for a second", "type": "observed", "evidence": ["ev_edit", "ev_reason"], "truth": "supported"},
+        {"claim": "The test moves the clock 1.001 seconds forward, just past the one-second session lifetime", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "Production code was not changed; only the test file was edited", "type": "observed", "evidence": ["ev_reason", "ev_edit"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "Before the fix, the test passed 183 of 200 runs", "type": "observed", "evidence": ["ev_before"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "After the fix, the test passed 200 of 200 runs", "type": "observed", "evidence": ["ev_after"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The test passed 200 of 200 runs before the fix", "type": "observed", "evidence": ["ev_before", "ev_after"], "truth": "planted", "plant": "test_misread", "falsehood": "before the fix"},
+        {"claim": "TestSessionExpires failed about one run in four on CI", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_number", "falsehood": "one run in four"},
+        {"claim": "Session expiry in the store now uses a monotonic clock", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "monotonic clock"},
+        {"claim": "The fix also changed the session store's production code", "type": "observed", "evidence": ["ev_reason", "ev_edit"], "truth": "planted", "plant": "contradicted", "falsehood": "changed the session store's production code"},
+        {"claim": "The fake clock starts at Unix time 1,700,000,000 because the test failed about one run in twelve", "type": "observed", "evidence": ["ev_edit", "ev_goal"], "truth": "planted", "plant": "false_because", "falsehood": "1,700,000,000 because the test failed"},
+        {"claim": "The test raced the real clock", "evidence": ["ev_before"], "truth": "planted", "plant": "wrong_citation", "falsehood": "raced the real clock"}
+      ]
+    },
+    {
+      "name": "order-service-logging",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: decouple OrderService from Serilog", "excerpt": "OrderService calls Serilog's static Log class directly, so tests cannot check what it logs."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: inject ILogger", "excerpt": "Inject Microsoft.Extensions.Logging's ILogger<OrderService> through the constructor. Keep every message and level the same; this is a refactor, not a behavior change."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: src/Orders/OrderService.cs, src/Program.cs, tests/Orders/OrderServiceTests.cs", "paths": ["src/Orders/OrderService.cs", "src/Program.cs", "tests/Orders/OrderServiceTests.cs"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: dotnet test, 212/212 pass", "test": {"command": "dotnet test", "passed": 212, "total": 212}}
+      ],
+      "diff": [
+        {"path": "src/Orders/OrderService.cs", "diff": "@@ -1,20 +1,22 @@\n-using Serilog;\n+using Microsoft.Extensions.Logging;\n \n public class OrderService\n {\n     private readonly IOrderRepo _repo;\n-    public OrderService(IOrderRepo repo) { _repo = repo; }\n+    private readonly ILogger<OrderService> _log;\n+    public OrderService(IOrderRepo repo, ILogger<OrderService> log) { _repo = repo; _log = log; }\n \n     public void Place(Order o)\n     {\n-        Log.Information(\"Placing order {OrderId}\", o.Id);\n+        _log.LogInformation(\"Placing order {OrderId}\", o.Id);\n         _repo.Save(o);\n         if (o.ShippingAddress is null)\n-            Log.Warning(\"Order {OrderId} has no shipping address\", o.Id);\n+            _log.LogWarning(\"Order {OrderId} has no shipping address\", o.Id);\n     }\n }\n"},
+        {"path": "src/Program.cs", "diff": "@@ -22,1 +22,1 @@\n-builder.Services.AddSingleton<OrderService>(sp => new OrderService(sp.GetRequiredService<IOrderRepo>()));\n+builder.Services.AddSingleton<OrderService>();\n"},
+        {"path": "tests/Orders/OrderServiceTests.cs", "diff": "@@ -30,0 +30,8 @@\n+    [Fact]\n+    public void WarnsWhenShippingAddressIsMissing()\n+    {\n+        var log = new FakeLogger<OrderService>();\n+        new OrderService(new InMemoryOrderRepo(), log).Place(new Order(7, ShippingAddress: null));\n+        Assert.Single(log.Entries, e => e.Level == LogLevel.Warning);\n+    }\n+\n"}
+      ],
+      "claims": [
+        {"claim": "OrderService now takes an ILogger<OrderService> through its constructor instead of calling Serilog's static Log class", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "Log messages and their levels stayed the same", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "A new test checks that placing an order without a shipping address logs one warning", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "Program.cs registers OrderService without a hand-written factory", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "dotnet test passed 212 of 212", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "All services in the app now log through ILogger instead of Serilog", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "overreach", "falsehood": "All services in the app"},
+        {"claim": "A missing shipping address is now logged as an error", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "one_word", "falsehood": "error"},
+        {"claim": "Serilog was removed from the project's dependencies", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "removed from the project's dependencies"},
+        {"claim": "ILogger was chosen because it is the standard .NET logging abstraction", "evidence": ["ev_decision"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "standard .NET logging abstraction"},
+        {"claim": "Program.cs dropped the hand-written factory because dotnet test passed 212 of 212", "type": "observed", "evidence": ["ev_edit", "ev_tests"], "truth": "planted", "plant": "false_because", "falsehood": "factory because dotnet test passed"}
+      ]
+    },
+    {
+      "name": "exports-bucket-lockdown",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: lock down the exports bucket", "excerpt": "Audit found the exports bucket allows public ACLs and keeps no old versions. Customer exports must never be public."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: block public access and version", "excerpt": "Turn on all four public access blocks. Enable versioning so an overwritten export can be recovered, and expire noncurrent versions after 30 days to cap storage."},
+        {"id": "ev_review", "type": "review", "fact": "review: compliance", "excerpt": "30 days of old versions is enough for our recovery policy. Do not turn on object lock; legal has not approved retention rules yet."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: infra/s3_exports.tf", "paths": ["infra/s3_exports.tf"]},
+        {"id": "ev_plan", "type": "test", "fact": "test: terraform plan, 1/1 pass", "excerpt": "Plan: 3 to add, 0 to change, 0 to destroy.", "test": {"command": "terraform plan", "passed": 1, "total": 1}}
+      ],
+      "diff": [
+        {"path": "infra/s3_exports.tf", "diff": "@@ -1,3 +1,30 @@\n resource \"aws_s3_bucket\" \"exports\" {\n   bucket = \"acme-customer-exports\"\n }\n+\n+resource \"aws_s3_bucket_public_access_block\" \"exports\" {\n+  bucket                  = aws_s3_bucket.exports.id\n+  block_public_acls       = true\n+  block_public_policy     = true\n+  ignore_public_acls      = true\n+  restrict_public_buckets = true\n+}\n+\n+resource \"aws_s3_bucket_versioning\" \"exports\" {\n+  bucket = aws_s3_bucket.exports.id\n+  versioning_configuration {\n+    status = \"Enabled\"\n+  }\n+}\n+\n+resource \"aws_s3_bucket_lifecycle_configuration\" \"exports\" {\n+  bucket = aws_s3_bucket.exports.id\n+  rule {\n+    id     = \"expire-old-versions\"\n+    status = \"Enabled\"\n+    filter {}\n+    noncurrent_version_expiration {\n+      noncurrent_days = 30\n+    }\n+  }\n+}\n"}
+      ],
+      "claims": [
+        {"claim": "All four S3 public access blocks are turned on for the exports bucket", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "Versioning is enabled on the exports bucket so an overwritten export can be recovered", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "Superseded versions of an export are kept for 30 days, then expire", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"claim": "Object lock was left off because legal has not approved retention rules", "evidence": ["ev_review", "ev_edit"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "terraform plan showed 3 resources to add and none to change or destroy", "type": "observed", "evidence": ["ev_plan"], "truth": "supported"},
+        {"claim": "Object lock was turned on to enforce retention", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "contradicted", "falsehood": "Object lock was turned on"},
+        {"claim": "Noncurrent versions expire after 90 days", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "wrong_number", "falsehood": "90 days"},
+        {"claim": "Compliance asked for all four public access blocks", "evidence": ["ev_review", "ev_decision"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "Compliance asked"},
+        {"claim": "Versioning was enabled to meet compliance's retention rules", "evidence": ["ev_decision", "ev_review"], "truth": "planted", "plant": "wrong_reason", "falsehood": "to meet compliance's retention rules"},
+        {"claim": "The change blocks public ACLs and policies, enables versioning, and encrypts the bucket with a KMS key", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "partly_false", "falsehood": "encrypts the bucket with a KMS key"}
+      ]
+    },
+    {
+      "name": "feed-image-cache",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: stop the feed from downloading images again", "excerpt": "Scrolling the feed back up downloads the same images again. Cache decoded images in memory."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: NSCache", "excerpt": "Use NSCache, which drops entries under memory pressure on its own. Cap it at 200 images and 50 MB of decoded pixels."},
+        {"id": "ev_dict", "type": "attempt", "fact": "edit: Feed/ImageCache.swift (Dictionary cache)", "paths": ["Feed/ImageCache.swift"]},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: Dictionary cache", "excerpt": "A plain Dictionary never evicts; the app hit a memory warning after 3 minutes of scrolling."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: Feed/ImageCache.swift, Feed/FeedCell.swift", "paths": ["Feed/ImageCache.swift", "Feed/FeedCell.swift"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: xcodebuild test -only-testing:FeedTests, 26/27 pass", "excerpt": "testPrefetchCancelsOnReuse timed out after 2s.", "test": {"command": "xcodebuild test -only-testing:FeedTests", "passed": 26, "total": 27}}
+      ],
+      "diff": [
+        {"path": "Feed/ImageCache.swift", "diff": "@@ -0,0 +1,19 @@\n+final class ImageCache {\n+    static let shared = ImageCache()\n+    private let cache = NSCache<NSURL, UIImage>()\n+\n+    private init() {\n+        cache.countLimit = 200\n+        cache.totalCostLimit = 50 * 1024 * 1024\n+    }\n+\n+    func image(for url: URL) -> UIImage? {\n+        cache.object(forKey: url as NSURL)\n+    }\n+\n+    func insert(_ image: UIImage, for url: URL) {\n+        let cost = Int(image.size.width * image.size.height * image.scale * image.scale) * 4\n+        cache.setObject(image, forKey: url as NSURL, cost: cost)\n+    }\n+}\n"},
+        {"path": "Feed/FeedCell.swift", "diff": "@@ -31,1 +31,9 @@ final class FeedCell: UICollectionViewCell {\n-        loader.load(url) { [weak self] image in self?.photo.image = image }\n+        if let cached = ImageCache.shared.image(for: url) {\n+            photo.image = cached\n+            return\n+        }\n+        loader.load(url) { [weak self] image in\n+            ImageCache.shared.insert(image, for: url)\n+            self?.photo.image = image\n+        }\n"}
+      ],
+      "claims": [
+        {"claim": "Decoded feed images are cached in an NSCache capped at 200 images", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "The image cache's total cost limit is 50 MiB", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "FeedCell shows a cached image without starting a download", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "rejected", "claim": "A Dictionary cache was dropped because it never evicted and the app hit a memory warning after 3 minutes of scrolling", "type": "observed", "evidence": ["ev_dict", "ev_abandon"], "truth": "supported"},
+        {"claim": "NSCache was picked because it drops entries under memory pressure on its own", "evidence": ["ev_decision"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "FeedTests passed 26 of 27; testPrefetchCancelsOnReuse timed out after 2s", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "testPrefetchCancelsOnReuse timed out after 5s", "type": "observed", "evidence": ["ev_tests"], "truth": "planted", "plant": "test_misread", "falsehood": "5s"},
+        {"claim": "Feed images are cached in a plain Dictionary keyed by URL", "type": "observed", "evidence": ["ev_dict", "ev_edit"], "truth": "planted", "plant": "rejected_as_implemented", "falsehood": "cached in a plain Dictionary"},
+        {"claim": "The image cache is capped at 500 images", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "wrong_number", "falsehood": "capped at 500 images"},
+        {"claim": "NSCache was picked because it is thread-safe", "evidence": ["ev_decision"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "thread-safe"},
+        {"claim": "FeedCell shows a cached image while starting a download", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "one_word", "falsehood": "while starting a download"},
+        {"claim": "A plain Dictionary never evicts entries", "evidence": ["ev_decision"], "truth": "planted", "plant": "wrong_citation", "falsehood": "never evicts"}
+      ]
+    },
+    {
+      "name": "payment-call-timeout",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: stop slow payments from crashing checkout", "excerpt": "Checkout crashes with an exit from GenServer.call after 5 seconds when the payment provider is slow. Provider p99 is 9 seconds."},
+        {"id": "ev_task", "type": "attempt", "fact": "edit: lib/shop/payments.ex (Task.async)", "paths": ["lib/shop/payments.ex"]},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: Task.async", "excerpt": "Moving the call into Task.async still needed a timeout on Task.await, and checkout needs the result before it can continue. No gain; reverting."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: longer call timeout", "excerpt": "Give the charge call an explicit 15 second timeout, above the provider's 9 second p99. Catch the exit and return {:error, :timeout} so checkout can show a retry message."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: lib/shop/payments.ex, lib/shop_web/live/checkout_live.ex", "paths": ["lib/shop/payments.ex", "lib/shop_web/live/checkout_live.ex"]},
+        {"id": "ev_tests", "type": "test", "fact": "test: mix test test/shop/payments_test.exs, 11/11 pass", "test": {"command": "mix test test/shop/payments_test.exs", "passed": 11, "total": 11}}
+      ],
+      "diff": [
+        {"path": "lib/shop/payments.ex", "diff": "@@ -20,5 +20,11 @@ defmodule Shop.Payments do\n+  @charge_timeout 15_000\n+\n   def charge(order) do\n-    GenServer.call(__MODULE__, {:charge, order})\n+    try do\n+      GenServer.call(__MODULE__, {:charge, order}, @charge_timeout)\n+    catch\n+      :exit, {:timeout, _} -> {:error, :timeout}\n+    end\n   end\n"},
+        {"path": "lib/shop_web/live/checkout_live.ex", "diff": "@@ -44,0 +44,3 @@ def handle_event(\"pay\", _params, socket) do\n+      {:error, :timeout} ->\n+        {:noreply, put_flash(socket, :error, \"The payment is taking longer than usual. Please try again.\")}\n+\n"}
+      ],
+      "claims": [
+        {"claim": "Payment charge calls now wait up to 15 seconds instead of 5", "type": "observed", "evidence": ["ev_edit", "ev_decision", "ev_goal"], "truth": "supported"},
+        {"claim": "The 15 second timeout was chosen to sit above the provider's 9 second p99", "evidence": ["ev_decision"], "truth": "supported"},
+        {"claim": "A charge that times out now returns {:error, :timeout} instead of crashing checkout", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "On a charge timeout, checkout shows a message asking the customer to try again", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "rejected", "claim": "Moving the call into Task.async was dropped because checkout needs the result before it can continue", "type": "observed", "evidence": ["ev_task", "ev_abandon"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The payments tests passed 11 of 11", "type": "observed", "evidence": ["ev_tests"], "truth": "supported"},
+        {"claim": "The charge call now runs inside a Task.async", "type": "observed", "evidence": ["ev_task", "ev_edit"], "truth": "planted", "plant": "stale", "falsehood": "runs inside a Task.async"},
+        {"claim": "The payment provider's p99 latency is 12 seconds", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_number", "falsehood": "12 seconds"},
+        {"claim": "Timed-out charges are retried automatically up to three times", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "retried automatically"},
+        {"claim": "The charge call catches timeout exits because the provider's p99 is 9 seconds", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "false_because", "falsehood": "exits because the provider's p99"},
+        {"claim": "Charges get a 15 second timeout, a timeout returns {:error, :timeout}, and the order is cancelled", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "partly_false", "falsehood": "the order is cancelled"},
+        {"claim": "The 15 second timeout was chosen to sit below the provider's 9 second p99", "evidence": ["ev_decision"], "truth": "planted", "plant": "one_word", "falsehood": "below"}
+      ]
+    },
+    {
+      "name": "graceful-shutdown",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: stop dropping requests on deploy", "excerpt": "Every deploy returns a burst of 502s: pods exit on SIGTERM while requests are still in flight."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: drain on SIGTERM", "excerpt": "On SIGTERM, stop accepting new connections and let in-flight requests finish, with a 25 second limit. Kubernetes kills the pod 30 seconds after SIGTERM, so 25 leaves room to flush logs."},
+        {"id": "ev_review", "type": "review", "fact": "review: platform team", "excerpt": "Do not add a preStop sleep hook in this change; we will tune that in the Helm chart separately."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: cmd/api/main.go", "paths": ["cmd/api/main.go"]},
+        {"id": "ev_deploy", "type": "test", "fact": "test: rolling deploy on staging under load, 1/1 pass", "excerpt": "k6 at 200 rps during a rolling deploy: 0 errors in 48,000 requests.", "test": {"command": "rolling deploy on staging under load", "passed": 1, "total": 1}}
+      ],
+      "diff": [
+        {"path": "cmd/api/main.go", "diff": "@@ -51,1 +51,17 @@ func main() {\n-\tlog.Fatal(srv.ListenAndServe())\n+\tgo func() {\n+\t\tif err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {\n+\t\t\tlog.Fatal(err)\n+\t\t}\n+\t}()\n+\n+\tstop := make(chan os.Signal, 1)\n+\tsignal.Notify(stop, syscall.SIGTERM, os.Interrupt)\n+\t<-stop\n+\n+\tctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)\n+\tdefer cancel()\n+\tif err := srv.Shutdown(ctx); err != nil {\n+\t\tlog.Printf(\"shutdown: %v\", err)\n+\t}\n+\tlogger.Sync()\n"}
+      ],
+      "claims": [
+        {"claim": "On SIGTERM or an interrupt, the API server stops accepting new connections and lets in-flight requests finish", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "In-flight requests get at most 25 seconds to finish after SIGTERM", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "The 25 second limit leaves room to flush logs before Kubernetes kills the pod 30 seconds after SIGTERM", "evidence": ["ev_decision"], "truth": "supported"},
+        {"claim": "The server flushes its logger after shutdown", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "No preStop hook was added; the platform team will tune that in the Helm chart", "evidence": ["ev_review", "ev_edit"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "A staging rolling deploy under 200 rps of k6 load had 0 errors in 48,000 requests", "type": "observed", "evidence": ["ev_deploy"], "truth": "supported"},
+        {"claim": "In-flight requests get a 30 second limit to finish", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "wrong_number", "falsehood": "30 second limit"},
+        {"claim": "Added a preStop sleep hook so the load balancer stops sending traffic first", "type": "observed", "evidence": ["ev_review", "ev_edit"], "truth": "planted", "plant": "contradicted", "falsehood": "Added a preStop sleep hook"},
+        {"section": "evidence_summary", "claim": "Deploys no longer drop any requests in production", "type": "observed", "evidence": ["ev_deploy", "ev_goal"], "truth": "planted", "plant": "overreach", "falsehood": "drop any requests in production"},
+        {"claim": "The platform team set the 25 second shutdown limit", "evidence": ["ev_decision", "ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The platform team set"},
+        {"claim": "Kubernetes sends SIGKILL when the 30 second grace period ends", "evidence": ["ev_decision"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "SIGKILL"},
+        {"claim": "Pods used to exit on SIGTERM while requests were still in flight", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_citation", "falsehood": "while requests were still in flight"}
+      ]
+    },
+    {
+      "name": "api-image-size",
+      "events": [
+        {"id": "ev_goal", "type": "goal", "fact": "goal: shrink the API image", "excerpt": "The API image is 1.2 GB and takes 4 minutes to pull on a cold staging node."},
+        {"id": "ev_decision", "type": "decision", "fact": "decision: multi-stage build", "excerpt": "Build wheels in a full python:3.12 stage, then copy only the wheels into python:3.12-slim. Compilers and headers stay out of the final image."},
+        {"id": "ev_alpine", "type": "attempt", "fact": "edit: Dockerfile (alpine base)", "paths": ["Dockerfile"]},
+        {"id": "ev_abandon", "type": "abandon", "fact": "abandon: alpine", "excerpt": "On alpine, numpy and psycopg have no musl wheels in our pinned versions, so pip compiled them from source and builds took 25 minutes. Back to slim."},
+        {"id": "ev_edit", "type": "attempt", "fact": "edit: Dockerfile", "paths": ["Dockerfile"]},
+        {"id": "ev_size", "type": "test", "fact": "test: docker image size check, 1/1 pass", "excerpt": "Final image: 310 MB. Cold pull on a staging node: 55 seconds.", "test": {"command": "docker image size check", "passed": 1, "total": 1}}
+      ],
+      "diff": [
+        {"path": "Dockerfile", "diff": "@@ -1,6 +1,12 @@\n-FROM python:3.12\n-WORKDIR /app\n-COPY requirements.txt .\n-RUN pip install -r requirements.txt\n-COPY . .\n+FROM python:3.12 AS build\n+WORKDIR /build\n+COPY requirements.txt .\n+RUN pip wheel --wheel-dir /wheels -r requirements.txt\n+\n+FROM python:3.12-slim\n+WORKDIR /app\n+COPY --from=build /wheels /wheels\n+RUN pip install --no-cache-dir /wheels/* && rm -rf /wheels\n+COPY . .\n CMD [\"gunicorn\", \"app:app\"]\n"}
+      ],
+      "claims": [
+        {"claim": "The Dockerfile now builds wheels in a full python:3.12 stage and installs them into python:3.12-slim", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "supported"},
+        {"claim": "Compilers and headers stay out of the final image", "type": "observed", "evidence": ["ev_decision", "ev_edit"], "truth": "supported"},
+        {"claim": "The wheel files are deleted after installation, and pip keeps no cache", "type": "observed", "evidence": ["ev_edit"], "truth": "supported"},
+        {"section": "rejected", "claim": "An alpine base was dropped because pip compiled numpy and psycopg from source and builds took 25 minutes", "type": "observed", "evidence": ["ev_alpine", "ev_abandon"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "The image shrank from 1.2 GB to 310 MB", "type": "observed", "evidence": ["ev_goal", "ev_size"], "truth": "supported"},
+        {"section": "evidence_summary", "claim": "A cold pull now takes 55 seconds on a staging node, against 4 minutes before", "type": "observed", "evidence": ["ev_size", "ev_goal"], "truth": "supported"},
+        {"claim": "The final image is based on Alpine", "type": "observed", "evidence": ["ev_alpine", "ev_edit"], "truth": "planted", "plant": "rejected_as_implemented", "falsehood": "based on Alpine"},
+        {"claim": "Image builds take 25 minutes because pip compiles numpy and psycopg from source", "type": "observed", "evidence": ["ev_abandon", "ev_edit"], "truth": "planted", "plant": "stale", "falsehood": "take 25 minutes"},
+        {"section": "rejected", "claim": "Alpine was dropped because its images came out larger than slim", "evidence": ["ev_abandon"], "truth": "planted", "plant": "wrong_reason", "falsehood": "larger than slim"},
+        {"section": "rejected", "claim": "Alpine was dropped because musl cannot use manylinux wheels", "evidence": ["ev_abandon"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "manylinux"},
+        {"section": "evidence_summary", "claim": "The image grew to 310 MB", "type": "observed", "evidence": ["ev_size", "ev_goal"], "truth": "planted", "plant": "one_word", "falsehood": "grew"},
+        {"section": "evidence_summary", "claim": "The size check passed with a final image under 300 MB", "type": "observed", "evidence": ["ev_size"], "truth": "planted", "plant": "test_misread", "falsehood": "under 300 MB"}
+      ]
+    }
+  ]
+}

@@ -31,7 +31,7 @@ pub struct Out {
 }
 
 impl Out {
-    fn new(data: Value, human: impl Into<String>) -> Self {
+    pub(crate) fn new(data: Value, human: impl Into<String>) -> Self {
         Self {
             data,
             human: human.into(),
@@ -355,6 +355,7 @@ pub fn land(
     work_unit: Option<String>,
     to: String,
     since: Option<String>,
+    study_baseline: Option<PathBuf>,
 ) -> Result<Out> {
     let ws = env.ws()?;
     let wu_id = work_unit_arg(&ws, work_unit);
@@ -416,6 +417,21 @@ pub fn land(
     let result = synth::synthesize(&ws.cfg, &mut gate, &input, &ignored)
         .map(|s| synth::guard_landed(s, &events, &landed_paths))
         .and_then(|s| synth::validate(&ws.cfg, &mut gate, s, &events, &diff, &ignored));
+    // M0 control arm: the same events and diff, one plain call, no drafts.
+    let mut baseline = None;
+    let result = match (result, &study_baseline) {
+        (Ok(s), Some(_)) => {
+            let plain = synth::Input {
+                drafts: &[],
+                ..input
+            };
+            crate::study::baseline(&ws.cfg, &mut gate, &plain, &ignored).map(|b| {
+                baseline = Some(b);
+                s
+            })
+        }
+        (r, _) => r,
+    };
     let manifest = EgressManifest {
         id: egress_id.clone(),
         calls: gate.calls,
@@ -480,6 +496,12 @@ pub fn land(
     wu.meta.landed_at = Some(id::now_ms());
     wu.save_meta()?;
     let mut human = render::markdown(&story);
+    let mut study_sheet = None;
+    if let (Some(dir), Some(b)) = (&study_baseline, &baseline) {
+        let path = crate::study::write_sheet(dir, &story, &commit.subject, b)?;
+        human.push_str(&format!("\nstudy: rating sheet {}\n", path.display()));
+        study_sheet = Some(path);
+    }
     for p in &proposals {
         human.push_str(&format!(
             "\nproposed: {} {:?} {} ({}) — accept with `git story link --accept {}`",
@@ -487,7 +509,7 @@ pub fn land(
         ));
     }
     Ok(Out::new(
-        json!({"story": story_view(env, &story), "proposals": proposals, "cited_events": cited.len(), "egress": manifest}),
+        json!({"story": story_view(env, &story), "proposals": proposals, "cited_events": cited.len(), "egress": manifest, "study_sheet": study_sheet}),
         human,
     ))
 }
@@ -793,6 +815,16 @@ pub fn search(env: &Env, query: String) -> Result<Out> {
 /// Re-run validation on a landed story using only what the store holds:
 /// the durable parts of cited events. Session logs, CI links and ghf traces
 /// may be gone; the story must still hold up (PRD §8.4).
+pub fn study_audit(env: &Env, corpus: PathBuf, targets: crate::study::Targets) -> Result<Out> {
+    if !(0.0..=1.0).contains(&targets.min_caught) || !(0.0..=1.0).contains(&targets.max_lost) {
+        fail!(
+            Usage,
+            "--min-caught and --max-lost are shares between 0 and 1"
+        );
+    }
+    crate::study::audit(&env.ws()?, &corpus, &targets)
+}
+
 pub fn validate(env: &Env, rev: String) -> Result<Out> {
     let ws = env.ws()?;
     let idx = ws.index()?;

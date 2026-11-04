@@ -18,12 +18,35 @@ if os.environ.get("MOCK_FAIL"):
 
 user = json.loads(req["user"])
 
+if "explanation" in req["schema"]["properties"]:
+    # The M0 control arm: one plain explanation.
+    print(json.dumps({"explanation": "Baseline: " + user["commit"]["subject"]}))
+    sys.exit(0)
+
+if "revisions" in req["schema"]["properties"]:
+    # The repair step: drop the hedge word, unless told to give up.
+    out = []
+    for c in user["claims"]:
+        if os.environ.get("MOCK_REPAIR") == "none":
+            out.append({"index": c["index"], "claim": None})
+        else:
+            out.append({"index": c["index"], "claim": c["claim"].replace("MAYBE ", "")})
+    print(json.dumps({"revisions": out}))
+    sys.exit(0)
+
 if "verdicts" in req["schema"]["properties"]:
+    if os.environ.get("MOCK_VERDICTS") == "skip":
+        # A model that answers without judging any claim.
+        print(json.dumps({"verdicts": []}))
+        sys.exit(0)
     out = []
     for c in user["claims"]:
         text = c["claim"]
         sup = "no" if "UNSUPPORTED" in text else "partly" if "MAYBE" in text else "yes"
-        out.append({"index": c["index"], "supported": sup, "note": ""})
+        out.append({"index": c["index"], "claim": text, "supported": sup, "note": ""})
+    if os.environ.get("MOCK_VERDICTS") == "swap" and len(out) > 1:
+        # A model that mixes up indexes but echoes the right claims.
+        out[0]["index"], out[1]["index"] = out[1]["index"], out[0]["index"]
     print(json.dumps({"verdicts": out}))
     sys.exit(0)
 
