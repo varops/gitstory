@@ -35,7 +35,7 @@ It runs the same steps as landing (local rules, then the validation pass with it
 - **claims repaired:** each rewrite is listed with its old and new wording. Check that every rewritten planted claim really lost its falsehood.
 - a breakdown by kind of plant, and every miss.
 
-Each run is scored against two targets: at least 95% of planted claims caught, and at most 5% of true claims lost. Change them with `--min-caught 0.9 --max-lost 0.1`. A target reads **shown** when the whole interval is on the right side, **not yet shown** when the rate meets it but the corpus is too small to be sure, and **missed** when the rate itself is on the wrong side. Both targets matter: catching everything is easy if you also lose every true claim.
+Each run is scored against two targets: at least 95% of planted claims caught, and at most 5% of true claims lost. Change them with `--min-caught 0.9 --max-lost 0.1`. A target reads **shown** when the whole interval is on the right side, **not yet shown** when the rate meets it but the corpus is too small to be sure, and **missed** when the rate itself is on the wrong side. The overall verdict is the weaker of the two: **shown** only when both are shown. Both targets matter: catching everything is easy if you also lose every true claim. With the shipped corpus (21 planted, 16 true claims) neither target can be shown even by a perfect run; the intervals are too wide. Even a perfect run needs at least 75 planted and 75 true claims to show them.
 
 ### The repair step
 

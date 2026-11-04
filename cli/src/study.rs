@@ -306,7 +306,14 @@ fn score(rows: &[Value], targets: &Targets) -> Value {
     let lost_rate = rate(lost, supported.len());
     let caught_target = target(&caught_rate, targets.min_caught, true);
     let lost_target = target(&lost_rate, targets.max_lost, false);
-    let met = caught_target != "missed" && lost_target != "missed";
+    // The weaker of the two: shown only when both are shown.
+    let overall = if caught_target == "missed" || lost_target == "missed" {
+        "missed"
+    } else if caught_target == "shown" && lost_target == "shown" {
+        "shown"
+    } else {
+        "not_yet_shown"
+    };
     let mut by_plant: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for r in &planted {
         let k = r["plant"].as_str().unwrap_or("unlabeled").to_owned();
@@ -326,7 +333,7 @@ fn score(rows: &[Value], targets: &Targets) -> Value {
             "max_lost": targets.max_lost,
             "caught": caught_target,
             "lost": lost_target,
-            "met": met,
+            "overall": overall,
         },
         "by_plant": by_plant
             .into_iter()
@@ -452,8 +459,11 @@ fn audit_text(report: &Value, rows: &[Value], cfg: &RepoConfig) -> String {
         }
     }
     t.push_str(&format!(
-        "\ntargets {}. 95% Wilson intervals; \"not yet shown\" means the rate meets the target but the interval is too wide to be sure. Overlapping intervals do not tell two rates apart.",
-        if report["targets"]["met"] == true { "met" } else { "MISSED" }
+        "\ntargets: {}. 95% Wilson intervals; \"not yet shown\" means the rate meets the target but the interval is too wide to be sure. Overlapping intervals do not tell two rates apart.",
+        report["targets"]["overall"]
+            .as_str()
+            .unwrap_or_default()
+            .replace('_', " ")
     ));
     t
 }

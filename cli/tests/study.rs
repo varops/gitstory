@@ -74,7 +74,8 @@ fn audit_counts_what_the_validator_catches() {
     // true claims lost is the same story for the 5% ceiling.
     assert_eq!(rep["targets"]["caught"], "not_yet_shown");
     assert_eq!(rep["targets"]["lost"], "not_yet_shown");
-    assert_eq!(rep["targets"]["met"], true);
+    // Neither target is missed, but neither is shown: overall is the weaker.
+    assert_eq!(rep["targets"]["overall"], "not_yet_shown");
     // Validation, repair and revalidation all went through the gate.
     let purposes: Vec<&str> = v["egress"]["calls"]
         .as_array()
@@ -252,7 +253,7 @@ fn audit_reports_missed_targets() {
         "claims": claims}]});
     let v = r.ok(&["study", "audit", &write_corpus(&r, &corpus)]);
     assert_eq!(v["report"]["targets"]["caught"], "missed");
-    assert_eq!(v["report"]["targets"]["met"], false);
+    assert_eq!(v["report"]["targets"]["overall"], "missed");
     // Custom targets are passed through.
     let v = r.ok(&[
         "study",
@@ -263,7 +264,7 @@ fn audit_reports_missed_targets() {
         "--max-lost",
         "1",
     ]);
-    assert_eq!(v["report"]["targets"]["met"], true);
+    assert_eq!(v["report"]["targets"]["overall"], "shown");
     assert_eq!(
         r.err(&[
             "study",
