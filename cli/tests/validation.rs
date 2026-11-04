@@ -175,3 +175,47 @@ fn swapped_indexes_do_not_move_verdicts() {
     assert_eq!(fate(&v, "UNSUPPORTED invented reason"), "dropped");
     assert_eq!(fate(&v, "Used X because Y"), "kept");
 }
+
+/// The diff counts as evidence only for claims that cite an edit or commit,
+/// and is not sent at all when no claim does.
+#[test]
+fn diff_applies_only_to_claims_that_cite_an_edit() {
+    let r = Repo::new("val-diff-rule");
+    let log = r.base.join("mock.log");
+    let requests = || -> Vec<Value> {
+        fs::read_to_string(&log)
+            .unwrap_or_default()
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap())
+            .filter(|q| q["schema"]["properties"].get("verdicts").is_some())
+            .map(|q| serde_json::from_str(q["user"].as_str().unwrap()).unwrap())
+            .collect()
+    };
+    let diff = json!([{"path": "src/a.rs", "diff": "@@ -1 +1 @@\n-old\n+new\n"}]);
+    let reason =
+        json!({"id": "ev_r", "type": "reason", "fact": "reason: x", "excerpt": "Use X because Y."});
+    let edit =
+        json!({"id": "ev_e", "type": "attempt", "fact": "edit: src/a.rs", "paths": ["src/a.rs"]});
+
+    // Only a reason is cited: the diff is not sent.
+    let corpus = json!({"cases": [{"name": "no-edit", "events": [reason], "diff": diff,
+        "claims": [{"claim": "Used X because Y", "evidence": ["ev_r"], "truth": "supported"}]}]});
+    let v = audit(&r, &corpus, &[]);
+    let sent = &requests()[0];
+    assert!(sent.get("diff").is_none(), "{sent}");
+    assert_eq!(sent["claims"][0]["diff_applies"], false);
+    assert_eq!(v["egress"]["calls"][0]["hunks"], json!([]));
+
+    // One claim cites the edit: the diff is sent, and only that claim may use it.
+    fs::remove_file(&log).unwrap();
+    let corpus = json!({"cases": [{"name": "edit", "events": [reason, edit], "diff": diff,
+    "claims": [
+        {"claim": "Used X because Y", "evidence": ["ev_r"], "truth": "supported"},
+        {"claim": "Changed src/a.rs", "type": "observed", "evidence": ["ev_e"], "truth": "supported"}
+    ]}]});
+    audit(&r, &corpus, &[]);
+    let sent = &requests()[0];
+    assert_eq!(sent["diff"][0]["path"], "src/a.rs");
+    assert_eq!(sent["claims"][0]["diff_applies"], false);
+    assert_eq!(sent["claims"][1]["diff_applies"], true);
+}
