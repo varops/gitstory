@@ -1367,3 +1367,77 @@ th:not(:first-child) {
     grid-template-columns: 1fr;
   }
 }
+
+/* validator benchmark */
+.bench {
+  margin: 28px 0 0;
+}
+.bench table th[scope="row"] {
+  color: var(--text);
+  font-size: 15px;
+}
+.bench td {
+  color: var(--muted);
+}
+.bench td strong {
+  color: var(--ok);
+  font-size: 18px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.bench .runs {
+  color: var(--muted);
+  font-weight: 400;
+}
+.bench thead th {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+.bench tbody th,
+.bench tbody td {
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+.bench figcaption {
+  max-width: 82ch;
+  margin-top: 14px;
+  color: var(--muted);
+  font-size: 14px;
+}
+.bench-limit {
+  max-width: 82ch;
+  margin: 24px 0 0;
+  padding: 16px 20px;
+  border-left: 3px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  background: var(--accent-soft);
+  color: var(--muted);
+  font-size: 15px;
+}
+.bench-limit strong {
+  color: var(--text);
+}
+.bench-limit a {
+  margin-left: 4px;
+  font-weight: 500;
+}
+@media (max-width: 600px) {
+  .bench th,
+  .bench td {
+    padding-left: 12px;
+    padding-right: 12px;
+  }
+  .bench td:not(:first-child),
+  .bench th:not(:first-child) {
+    white-space: normal;
+  }
+  .bench td strong {
+    font-size: 16px;
+  }
+}
+.bench tbody tr:last-child th {
+  border-bottom: 0;
+}
+.bench .nw {
+  white-space: nowrap;
+}
