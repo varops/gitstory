@@ -89,7 +89,7 @@
         {"section": "rejected", "claim": "A Redis cache was removed because it was too slow", "type": "observed", "evidence": ["ev_redis", "ev_abandon"], "truth": "planted", "plant": "wrong_reason", "falsehood": "too slow"},
         {"claim": "The search cache lives in src/search/redis_cache.ts", "type": "observed", "evidence": ["ev_redis", "ev_edit"], "truth": "planted", "plant": "stale", "falsehood": "redis_cache.ts"},
         {"claim": "Review asked to keep the cache out-of-process", "evidence": ["ev_reject"], "truth": "planted", "plant": "one_word", "falsehood": "out-of-process"},
-        {"claim": "The LRU holds 10,000 entries because p95 for /search was 1.8s", "evidence": ["ev_lru", "ev_goal"], "truth": "planted", "plant": "false_because", "falsehood": "because p95"}
+        {"claim": "The LRU holds 10,000 entries because p95 for /search was 1.8s", "evidence": ["ev_lru", "ev_goal"], "truth": "planted", "plant": "false_because", "falsehood": "10,000 entries because p95"}
       ]
     },
     {
@@ -137,7 +137,7 @@
         {"claim": "The database column was changed from TIMESTAMP to DATE", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "from TIMESTAMP to DATE"},
         {"section": "evidence_summary", "claim": "The invoice suite passed 64 of 64 tests, including new tests for UTC-5", "type": "observed", "evidence": ["ev_tests"], "truth": "planted", "plant": "overreach", "falsehood": "including new tests for UTC-5"},
         {"claim": "Invoices for customers in UTC-5 showed the next day", "evidence": ["ev_goal"], "truth": "planted", "plant": "one_word", "falsehood": "next day"},
-        {"claim": "Invoice dates are sent as YYYY-MM-DD strings because the invoice suite passed 64 of 64 tests", "type": "observed", "evidence": ["ev_edit", "ev_tests"], "truth": "planted", "plant": "false_because", "falsehood": "because the invoice suite passed"},
+        {"claim": "Invoice dates are sent as YYYY-MM-DD strings because the invoice suite passed 64 of 64 tests", "type": "observed", "evidence": ["ev_edit", "ev_tests"], "truth": "planted", "plant": "false_because", "falsehood": "strings because the invoice suite passed"},
         {"claim": "The security team asked to store invoice dates as plain strings", "evidence": ["ev_reason"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The security team asked"}
       ]
     },
@@ -190,7 +190,7 @@
         {"claim": "The platform team asked to keep the 5s connect and 30s request timeouts", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "The platform team asked"},
         {"claim": "OkHttp was dropped because the JDK client supports HTTP/2", "evidence": ["ev_reason"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "supports HTTP/2"},
         {"claim": "The connect timeout was raised to 5 seconds", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "one_word", "falsehood": "raised"},
-        {"claim": "BillingClient calls the blocking send() because the payments team asked for 30s request timeouts", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "false_because", "falsehood": "because the payments team"}
+        {"claim": "BillingClient calls the blocking send() because the payments team asked for 30s request timeouts", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "false_because", "falsehood": "send() because the payments team"}
       ]
     },
     {
@@ -242,7 +242,7 @@
         {"claim": "The view uses size because count would still run one SQL query per invoice", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "would still run one SQL query per invoice"},
         {"claim": "Loading 400 invoices used to take 4,001 queries", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_number", "falsehood": "4,001"},
         {"claim": "Added a database index on line_items.invoice_id", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "index on line_items.invoice_id"},
-        {"claim": "Rails loads all line items in one extra query because the list is ordered by created_at", "type": "observed", "evidence": ["ev_edit", "ev_reason"], "truth": "planted", "plant": "false_because", "falsehood": "because the list is ordered"}
+        {"claim": "Rails loads all line items in one extra query because the list is ordered by created_at", "type": "observed", "evidence": ["ev_edit", "ev_reason"], "truth": "planted", "plant": "false_because", "falsehood": "query because the list is ordered"}
       ]
     },
     {
@@ -320,7 +320,7 @@
         {"claim": "With streaming, memory grows with the number of rows exported", "evidence": ["ev_decision"], "truth": "planted", "plant": "one_word", "falsehood": "grows"},
         {"section": "evidence_summary", "claim": "The load test exported 2,000,000 rows in under 30s", "type": "observed", "evidence": ["ev_load"], "truth": "planted", "plant": "test_misread", "falsehood": "under 30s"},
         {"claim": "Finance asked to keep the CSV column order unchanged", "evidence": ["ev_review"], "truth": "planted", "plant": "wrong_attribution", "falsehood": "Finance asked"},
-        {"claim": "Rows are written in pages of 500 because finance's import script depends on the column order", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "false_because", "falsehood": "because finance's import script"}
+        {"claim": "Rows are written in pages of 500 because finance's import script depends on the column order", "type": "observed", "evidence": ["ev_edit", "ev_review"], "truth": "planted", "plant": "false_because", "falsehood": "500 because finance's import script"}
       ]
     },
     {
@@ -400,7 +400,7 @@
         {"claim": "TestSessionExpires failed about one run in four on CI", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_number", "falsehood": "one run in four"},
         {"claim": "Session expiry in the store now uses a monotonic clock", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "monotonic clock"},
         {"claim": "The fix also changed the session store's production code", "type": "observed", "evidence": ["ev_reason", "ev_edit"], "truth": "planted", "plant": "contradicted", "falsehood": "changed the session store's production code"},
-        {"claim": "The fake clock starts at Unix time 1,700,000,000 because the test failed about one run in twelve", "type": "observed", "evidence": ["ev_edit", "ev_goal"], "truth": "planted", "plant": "false_because", "falsehood": "because the test failed"},
+        {"claim": "The fake clock starts at Unix time 1,700,000,000 because the test failed about one run in twelve", "type": "observed", "evidence": ["ev_edit", "ev_goal"], "truth": "planted", "plant": "false_because", "falsehood": "1,700,000,000 because the test failed"},
         {"claim": "The test raced the real clock", "evidence": ["ev_before"], "truth": "planted", "plant": "wrong_citation", "falsehood": "raced the real clock"}
       ]
     },
@@ -427,7 +427,7 @@
         {"claim": "A missing shipping address is now logged as an error", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "one_word", "falsehood": "error"},
         {"claim": "Serilog was removed from the project's dependencies", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "removed from the project's dependencies"},
         {"claim": "ILogger was chosen because it is the standard .NET logging abstraction", "evidence": ["ev_decision"], "truth": "planted", "plant": "outside_knowledge", "falsehood": "standard .NET logging abstraction"},
-        {"claim": "Program.cs dropped the hand-written factory because dotnet test passed 212 of 212", "type": "observed", "evidence": ["ev_edit", "ev_tests"], "truth": "planted", "plant": "false_because", "falsehood": "because dotnet test passed"}
+        {"claim": "Program.cs dropped the hand-written factory because dotnet test passed 212 of 212", "type": "observed", "evidence": ["ev_edit", "ev_tests"], "truth": "planted", "plant": "false_because", "falsehood": "factory because dotnet test passed"}
       ]
     },
     {
@@ -508,7 +508,7 @@
         {"claim": "The charge call now runs inside a Task.async", "type": "observed", "evidence": ["ev_task", "ev_edit"], "truth": "planted", "plant": "stale", "falsehood": "runs inside a Task.async"},
         {"claim": "The payment provider's p99 latency is 12 seconds", "evidence": ["ev_goal"], "truth": "planted", "plant": "wrong_number", "falsehood": "12 seconds"},
         {"claim": "Timed-out charges are retried automatically up to three times", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "invented", "falsehood": "retried automatically"},
-        {"claim": "The charge call catches timeout exits because the provider's p99 is 9 seconds", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "false_because", "falsehood": "because the provider's p99"},
+        {"claim": "The charge call catches timeout exits because the provider's p99 is 9 seconds", "type": "observed", "evidence": ["ev_edit", "ev_decision"], "truth": "planted", "plant": "false_because", "falsehood": "exits because the provider's p99"},
         {"claim": "Charges get a 15 second timeout, a timeout returns {:error, :timeout}, and the order is cancelled", "type": "observed", "evidence": ["ev_edit"], "truth": "planted", "plant": "partly_false", "falsehood": "the order is cancelled"},
         {"claim": "The 15 second timeout was chosen to sit below the provider's 9 second p99", "evidence": ["ev_decision"], "truth": "planted", "plant": "one_word", "falsehood": "below"}
       ]
