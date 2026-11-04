@@ -39,7 +39,7 @@ Each run is scored against two targets: at least 95% of planted claims caught, a
 
 ### The repair step
 
-When the validation model says a claim is only partly supported, its note says what is missing. Landing then asks the synthesis model once to rewrite the claim using only its cited evidence and the diff, and judges the rewrite again. A rewrite that passes replaces the claim; anything else moves to hypotheses as before. This saves true claims that were worded beyond their evidence (for example "64 MiB" where the diff says `64 * 1024`). The repair and second check are recorded in the egress manifest with purposes `repair` and `revalidation`, and only run when a claim fails.
+When the validation model says a claim is only partly supported, its note says what is missing. Landing then asks the synthesis model once to rewrite the claim using only its cited evidence and the diff, and judges the rewrite again. The rewrite must keep the claim's meaning (a reason stays a reason, an outcome stays an outcome); when the evidence does not support that meaning, the model gives up instead of swapping in a weaker fact. A rewrite that passes replaces the claim; anything else moves to hypotheses as before. This saves true claims that were worded beyond their evidence (for example "64 MiB" where the diff says `64 * 1024`). The repair and second check are recorded in the egress manifest with purposes `repair` and `revalidation`, and only run when a claim fails.
 
 The fixture data goes to the model through the egress gate like any other call. The manifest is in the `--json` output; nothing is written to the store.
 

@@ -509,8 +509,9 @@ const REPAIR: &str = r#"You fix claims that a checker could not fully confirm. F
 Rewrite each claim so the cited evidence and the diff alone support it:
 - keep what they support, remove or correct what they do not;
 - use their exact numbers, names and units, as written;
-- add no facts and use no outside knowledge.
-If nothing worth keeping is supported, return null for that claim."#;
+- add no facts and use no outside knowledge;
+- keep the claim's meaning: a reason stays a reason, an outcome stays an outcome, a decision stays a decision. Do not swap it for a different, weaker fact that happens to be supported.
+If the claim's meaning is not supported, return null for that claim."#;
 
 fn repair_schema() -> Value {
     json!({
