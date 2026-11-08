@@ -419,15 +419,25 @@ fn land_retry_finishes_instead_of_duplicating() {
             .any(|l| l["from"] == id.as_str() && l["to"] == a.as_str()),
         "the supersedes link was not finished: {log:?}"
     );
-    // Landing the same commit once more changes nothing.
+    // Landing the same commit once more changes nothing: a link removed
+    // since stays removed, and newer notes wait for the next round.
+    r.ok(&["link", &id, "--supersedes", &a, "--remove"]);
+    r.ok(&[
+        "note",
+        "Keep b small",
+        "--work-unit",
+        "feat/b",
+        "--supersedes",
+        &a,
+    ]);
     let third = r.ok(&["land", "--work-unit", "feat/b", "--to", "HEAD"]);
     assert_eq!(third["story"]["story_id"], id.as_str());
+    assert_eq!(third["story"]["supersedes"], json!([]));
     assert_eq!(stories_for_commit(&r, &sha), 1);
-    assert_eq!(link_log(&r).len(), log.len());
-    assert_eq!(
-        read_meta(&r, "feat/b")["landed"].as_array().unwrap().len(),
-        1
-    );
+    assert_eq!(link_log(&r).len(), log.len() + 1);
+    let meta = read_meta(&r, "feat/b");
+    assert_eq!(meta["landed"].as_array().unwrap().len(), 1);
+    assert_eq!(meta["supersedes"], json!([a]), "a newer note was consumed");
 }
 
 /// A `supersedes` note that would close a cycle is skipped and reported.

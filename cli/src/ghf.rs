@@ -42,9 +42,9 @@ fn ghf(ctx: &Ctx, args: &[&str]) -> Option<Value> {
 }
 
 /// Checkpoints of this worktree's traces, from the work unit's base onward,
-/// as attempt, test and abandon events. Holds each trace it reads; returns
-/// the events and the traces it placed or renewed a hold on, for the caller to record
-/// in the work unit's meta.
+/// as attempt, test and abandon events. Holds each trace it reads. Returns
+/// the events and the traces it placed or renewed a hold on, for the caller
+/// to record in the work unit's meta.
 pub fn traces(
     ctx: &Ctx,
     wu: &WorkUnit,

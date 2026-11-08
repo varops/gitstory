@@ -443,14 +443,6 @@ pub fn land(
         None => commit.parents.clone(),
     };
     let idx = ws.index()?;
-    // What this landing consumes; notes added meanwhile wait for the next.
-    let consumed_supersedes = wu.meta.supersedes.clone();
-    let round = Round {
-        sha: &sha,
-        since: since.is_some(),
-        drafts: &drafts,
-        consumed_supersedes: &consumed_supersedes,
-    };
 
     // This work unit already wrote a story for this commit: a retry after a
     // later step failed, or the same landing run twice. Finish the steps
@@ -464,8 +456,36 @@ pub fn land(
             .store
             .story(&found.story_id)?
             .ok_or_else(|| err!(NotFound, "no story {}", found.story_id))?;
-        let (apply, skipped) = plan_links(&ws, &story)?;
-        let proposals = plan_proposals(&ws, &idx, &story, &diff, &blame_base)?;
+        // A landing that finished changes nothing more: links removed since
+        // stay removed, and newer drafts and notes wait for the next round.
+        // One that was cut short closes its own round: the drafts made
+        // before its story, and the notes the story applied.
+        let done = wu.meta.has_landed(&sha);
+        let (reconciled, consumed): (Vec<Story>, Vec<String>) = if done {
+            (Vec::new(), Vec::new())
+        } else {
+            (
+                drafts
+                    .iter()
+                    .filter(|d| d.created_at <= story.created_at)
+                    .cloned()
+                    .collect(),
+                story.supersedes.clone(),
+            )
+        };
+        let round = Round {
+            sha: &sha,
+            since: since.is_some() && !done,
+            drafts: &reconciled,
+            consumed_supersedes: &consumed,
+        };
+        let (apply, skipped, proposals) = if done {
+            (Vec::new(), Vec::new(), Vec::new())
+        } else {
+            let (apply, skipped) = plan_links(&ws, &story)?;
+            let proposals = plan_proposals(&ws, &idx, &story, &diff, &blame_base)?;
+            (apply, skipped, proposals)
+        };
         finish_landing(&ws, &mut wu, &story, &round, &apply, &proposals)?;
         let manifest = ws.store.egress(&story.egress)?;
         let shown = ws.index()?.view(story);
@@ -481,6 +501,14 @@ pub fn land(
     let events = focus(wu.events()?, &landed_paths);
     let mut gate = Gate::new(&ws.cfg.egress);
     let ignored = ignored_fn(&ws, &wu_id);
+    // What this landing consumes; notes added meanwhile wait for the next.
+    let consumed_supersedes = wu.meta.supersedes.clone();
+    let round = Round {
+        sha: &sha,
+        since: since.is_some(),
+        drafts: &drafts,
+        consumed_supersedes: &consumed_supersedes,
+    };
     let input = synth::Input {
         work_unit: &wu_id,
         repo: &ws.store.repo,
