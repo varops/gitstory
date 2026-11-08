@@ -47,7 +47,7 @@ With `--json`, every command prints exactly one JSON object on stdout:
 | `E_NO_EVIDENCE` | 3 | The work unit has no evidence yet |
 | `E_EGRESS_DENIED` | 3 | The egress policy forbids the request; nothing was sent |
 | `E_LINK_CYCLE` | 3 | The link would create a supersession cycle |
-| `E_STORE_CONFLICT` | 4 | An import would overwrite different data |
+| `E_STORE_CONFLICT` | 4 | An import would overwrite different data, or another writer saved the same story version first; run the command again |
 | `E_UNTRUSTED_ENDPOINT` | 5 | The model endpoint is not trusted on this machine |
 | `E_AUTH` | 5 | Missing or rejected credentials |
 | `E_REMOTE` | 5 | The model or a remote store failed |
@@ -184,7 +184,7 @@ Open link proposals. Data: `{proposals[]}`.
 
 ### `edit [REV|STORY] [--story S] [--summary T] [--add-decision T]... [--add-unknown T]... [--promote N]... [--demote N]... [--review reviewed|flagged|unreviewed]`
 
-Edits a landed story as a new version; earlier versions are kept. The edit itself becomes a stated `review` event, and added or promoted decisions cite it. `--promote N` turns hypothesis N (0-based) into a stated decision. `--demote N` turns decision N into a hypothesis.
+Edits a landed story as a new version; earlier versions are kept. Each version is written once (create-only, with `If-None-Match: *` on S3): if another machine saved the same version first, the edit fails with `E_STORE_CONFLICT` and changes nothing, and running it again edits the newer version. The edit itself becomes a stated `review` event, and added or promoted decisions cite it. `--promote N` turns hypothesis N (0-based) into a stated decision. `--demote N` turns decision N into a hypothesis.
 
 Data: `{story, event}`.
 
@@ -194,7 +194,7 @@ Writes `gitstory-export.json` (schema `gitstory-export/v1`). Its `objects` hold 
 
 ### `import DIR|FILE`
 
-Imports an export. Every object is checked before anything is written. An object that already exists with different content stops the import with `E_STORE_CONFLICT`, except an `open` proposal, which takes the imported status. A proposal that is already `accepted`, `rejected` or `withdrawn` is never changed by import: a different status in the export stops the import with `E_STORE_CONFLICT`. Importing the same export twice changes nothing.
+Imports an export. Every object is checked before anything is written. Each story must follow the story rules and sit under its own id and version (`stories/<id>.json`, `stories/<id>/v<N>.json`); otherwise the import stops with `E_USAGE`. An object that already exists with different content stops the import with `E_STORE_CONFLICT`, except an `open` proposal, which takes the imported status. A proposal that is already `accepted`, `rejected` or `withdrawn` is never changed by import: a different status in the export stops the import with `E_STORE_CONFLICT`. Importing the same export twice changes nothing.
 
 Data: `{written, unchanged, repository}`.
 

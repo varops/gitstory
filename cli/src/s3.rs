@@ -207,6 +207,7 @@ impl S3Backend {
         key: Option<&str>,
         query: &[(&str, String)],
         body: &[u8],
+        extra: &[(&str, &str)],
     ) -> Result<(u16, Vec<u8>)> {
         let path = match key {
             Some(k) => format!("/{}/{}", self.bucket, uri_encode(k, true)),
@@ -238,7 +239,7 @@ impl S3Backend {
             &self.access_key,
             &self.secret_key,
             self.session_token.as_deref(),
-            &[],
+            extra,
         );
         let url = if qs.is_empty() {
             format!("{}{path}", self.endpoint)
@@ -304,7 +305,7 @@ fn xml_unescape(s: &str) -> String {
 
 impl Backend for S3Backend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let (status, data) = self.request("GET", Some(&self.full_key(key)), &[], b"")?;
+        let (status, data) = self.request("GET", Some(&self.full_key(key)), &[], b"", &[])?;
         match status {
             200 => Ok(Some(data)),
             404 => Ok(None),
@@ -313,11 +314,28 @@ impl Backend for S3Backend {
     }
 
     fn put(&self, key: &str, data: &[u8]) -> Result<()> {
-        let (status, _) = self.request("PUT", Some(&self.full_key(key)), &[], data)?;
+        let (status, _) = self.request("PUT", Some(&self.full_key(key)), &[], data, &[])?;
         if !(200..300).contains(&status) {
             fail!(Remote, "PUT {key}: HTTP {status}");
         }
         Ok(())
+    }
+
+    /// `If-None-Match: *`: the bucket refuses the PUT (412) when the key
+    /// exists, or (409) when another conditional write to it is in flight.
+    fn put_new(&self, key: &str, data: &[u8]) -> Result<()> {
+        let (status, _) = self.request(
+            "PUT",
+            Some(&self.full_key(key)),
+            &[],
+            data,
+            &[("if-none-match", "*")],
+        )?;
+        match status {
+            200..300 => Ok(()),
+            409 | 412 => fail!(StoreConflict, "{key} already exists"),
+            s => fail!(Remote, "PUT {key}: HTTP {s}"),
+        }
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
@@ -334,7 +352,7 @@ impl Backend for S3Backend {
             if let Some(t) = &token {
                 q.push(("continuation-token", t.clone()));
             }
-            let (status, data) = self.request("GET", None, &q, b"")?;
+            let (status, data) = self.request("GET", None, &q, b"", &[])?;
             if status != 200 {
                 fail!(Remote, "list {prefix}: HTTP {status}");
             }
@@ -400,6 +418,69 @@ mod tests {
     fn dates() {
         assert_eq!(amz_date(1_369_353_600), "20130524T000000Z");
         assert_eq!(amz_date(0), "19700101T000000Z");
+    }
+
+    /// A one-request HTTP server: answers 412 when the request carries
+    /// `If-None-Match: *`, else 200. Returns its URL and the request seen.
+    fn conditional_server() -> (String, std::thread::JoinHandle<String>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", l.local_addr().unwrap());
+        let h = std::thread::spawn(move || {
+            let (mut sock, _) = l.accept().unwrap();
+            let mut r = BufReader::new(sock.try_clone().unwrap());
+            let mut head = String::new();
+            let mut len = 0usize;
+            loop {
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                    len = v.trim().parse().unwrap();
+                }
+                if line == "\r\n" {
+                    break;
+                }
+                head.push_str(&line);
+            }
+            let mut body = vec![0; len];
+            r.read_exact(&mut body).unwrap();
+            let status = if head.to_ascii_lowercase().contains("if-none-match: *") {
+                "412 Precondition Failed"
+            } else {
+                "200 OK"
+            };
+            write!(sock, "HTTP/1.1 {status}\r\ncontent-length: 0\r\n\r\n").unwrap();
+            head
+        });
+        (url, h)
+    }
+
+    #[test]
+    fn put_new_is_conditional() {
+        let (url, server) = conditional_server();
+        let b = S3Backend {
+            endpoint: url,
+            bucket: "b".into(),
+            region: "us-east-1".into(),
+            prefix: String::new(),
+            access_key: "AK".into(),
+            secret_key: "SK".into(),
+            session_token: None,
+            agent: ureq::Agent::config_builder()
+                .http_status_as_error(false)
+                .build()
+                .into(),
+        };
+        let r = b.put_new("repos/a/b/stories/st_1/v2.json", b"{}");
+        let head = server.join().unwrap();
+        assert!(
+            head.to_ascii_lowercase().contains("if-none-match: *"),
+            "{head}"
+        );
+        assert_eq!(
+            r.unwrap_err().code,
+            gitstory_proto::ErrorCode::StoreConflict
+        );
     }
 
     #[test]

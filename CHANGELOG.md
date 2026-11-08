@@ -26,6 +26,9 @@
 
 - **ghf holds.** Each hold records when it was placed and is renewed once it is older than a week, so a long-running work unit no longer loses its trace when the 30-day hold expires. `gc` now releases the holds of the work units it removes.
 
+- **Story versions on a shared store.** Each `stories/<id>/vN.json` is now written create-only (`create_new` on the local store, `If-None-Match: *` on S3). Two concurrent `edit`s no longer silently replace one version with the other; the second fails with `E_STORE_CONFLICT` and can be run again.
+- **Import checks stories.** `import` refuses a story that breaks the story rules or whose id or version does not match its key.
+
 ### Changed
 
 - `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.

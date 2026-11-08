@@ -12,7 +12,8 @@
 //! | `commits/<sha>/<story-id>` | Commit to story association (empty object) |
 //!
 //! Every object is written whole and never edited in place except proposal
-//! status, so the same layout works on plain object storage.
+//! status, so the same layout works on plain object storage. Story versions
+//! are written create-only, so concurrent edits cannot replace each other.
 
 use std::fs;
 use std::io::Write;
@@ -30,6 +31,9 @@ use crate::{err, fail};
 pub trait Backend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
     fn put(&self, key: &str, data: &[u8]) -> Result<()>;
+    /// Write `key` only if it does not exist yet; `E_STORE_CONFLICT` if it
+    /// does.
+    fn put_new(&self, key: &str, data: &[u8]) -> Result<()>;
     /// Keys under `prefix`, sorted.
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
     fn describe(&self) -> String;
@@ -59,6 +63,42 @@ impl Backend for LocalBackend {
         f.sync_all()?;
         fs::rename(&tmp, &path).context(|| format!("write {key}"))?;
         Ok(())
+    }
+
+    /// Create-only and still atomic: the complete temp file is hard-linked
+    /// into place, which fails if the key exists. Without hard links,
+    /// falls back to creating the file with `create_new`.
+    fn put_new(&self, key: &str, data: &[u8]) -> Result<()> {
+        let path = self.root.join(key);
+        let dir = path.parent().expect("key has a parent");
+        fs::create_dir_all(dir).context(|| format!("create {}", dir.display()))?;
+        let exists = || err!(StoreConflict, "{key} already exists");
+        let tmp = dir.join(format!(".tmp-{}", gitstory_proto::id::random_hex(6)));
+        let mut f = fs::File::create(&tmp).context(|| format!("write {key}"))?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        let linked = fs::hard_link(&tmp, &path);
+        let _ = fs::remove_file(&tmp);
+        match linked {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists()),
+            Err(_) => {
+                let mut f = match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    Ok(f) => f,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        return Err(exists());
+                    }
+                    Err(e) => return Err(e).context(|| format!("write {key}")),
+                };
+                f.write_all(data)?;
+                f.sync_all()?;
+                Ok(())
+            }
+        }
     }
 
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
@@ -162,7 +202,23 @@ impl Store {
                 violations.join("; ")
             );
         }
-        self.put_json(&format!("stories/{}/v{}.json", s.story_id, s.version), s)?;
+        // A version is written once: two concurrent edits of the same story
+        // both make the same vN, and the second must not replace the first.
+        let mut data = serde_json::to_vec_pretty(s)?;
+        data.push(b'\n');
+        let key = self.key(&format!("stories/{}/v{}.json", s.story_id, s.version));
+        self.backend.put_new(&key, &data).map_err(|f| {
+            if f.code == gitstory_proto::ErrorCode::StoreConflict {
+                err!(
+                    StoreConflict,
+                    "version {} of {} was written by someone else meanwhile; run the command again",
+                    s.version,
+                    s.story_id
+                )
+            } else {
+                f
+            }
+        })?;
         self.put_json(&format!("stories/{}.json", s.story_id), s)?;
         for c in std::iter::once(&s.commit).chain(&s.contains) {
             self.backend

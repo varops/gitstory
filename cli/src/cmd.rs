@@ -1457,6 +1457,7 @@ pub fn import(env: &Env, src: PathBuf) -> Result<Out> {
         if key.contains("..") || key.starts_with('/') {
             fail!(Usage, "export contains an unsafe key {key:?}");
         }
+        check_imported_story(key, v)?;
         if let Some(existing) = ws.store.get_raw(key)? {
             let existing: Value = if existing.is_empty() {
                 Value::Null
@@ -1504,6 +1505,44 @@ pub fn import(env: &Env, src: PathBuf) -> Result<Out> {
         json!({"written": written, "unchanged": same, "repository": ws.store.repo}),
         format!("imported {written} object(s) ({same} already present)"),
     ))
+}
+
+/// A story in an export must follow the story rules and sit under its own
+/// id and version: `stories/<id>.json` or `stories/<id>/v<N>.json`.
+fn check_imported_story(key: &str, v: &Value) -> Result<()> {
+    let Some(rest) = key.strip_prefix("stories/") else {
+        return Ok(());
+    };
+    let (id, version) = match rest.split_once('/') {
+        Some((id, file)) => {
+            let n = file
+                .strip_prefix('v')
+                .and_then(|f| f.strip_suffix(".json"))
+                .and_then(|n| n.parse::<u32>().ok())
+                .ok_or_else(|| err!(Usage, "export contains an unexpected key {key:?}"))?;
+            (id, Some(n))
+        }
+        None => (rest.strip_suffix(".json").unwrap_or(rest), None),
+    };
+    let s: Story = serde_json::from_value(v.clone())
+        .map_err(|e| err!(Usage, "export holds an invalid story {key}: {e}"))?;
+    if s.story_id != id {
+        fail!(Usage, "{key} holds story {}", s.story_id);
+    }
+    if let Some(n) = version
+        && s.version != n
+    {
+        fail!(Usage, "{key} holds version {} of {id}", s.version);
+    }
+    let violations = s.violations();
+    if !violations.is_empty() {
+        fail!(
+            Usage,
+            "export holds an invalid story {key}: {}",
+            violations.join("; ")
+        );
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

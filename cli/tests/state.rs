@@ -847,3 +847,43 @@ fn gc_releases_ghf_holds() {
     assert_eq!(gc["removed"], json!(["feat/g"]));
     assert_eq!(count(&log, "trace release tr_1"), 1, "hold not released");
 }
+
+// ---------------------------------------------------------------------------
+// 8. Story versions are written once
+
+/// An edit that would replace a version someone else just wrote fails.
+#[test]
+fn edit_never_replaces_an_existing_version() {
+    let r = Repo::new("version-race");
+    let id = land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    let dir = store_dir(&r).join("stories").join(&id);
+    // Another machine's edit wrote v2 but not yet the current copy.
+    let mut theirs: Value =
+        serde_json::from_slice(&fs::read(dir.join("v1.json")).unwrap()).unwrap();
+    theirs["version"] = json!(2);
+    theirs["summary"] = json!("their edit");
+    let theirs = serde_json::to_vec_pretty(&theirs).unwrap();
+    fs::write(dir.join("v2.json"), &theirs).unwrap();
+    let (code, v) = r.run(&["edit", &id, "--summary", "my edit"]);
+    assert_ne!(code, 0, "{v}");
+    assert_eq!(v["error"]["code"], "E_STORE_CONFLICT", "{v}");
+    assert!(v["error"]["message"].as_str().unwrap().contains("again"));
+    assert_eq!(fs::read(dir.join("v2.json")).unwrap(), theirs);
+}
+
+/// Import refuses a story whose version does not match its key.
+#[test]
+fn import_refuses_a_story_under_the_wrong_version() {
+    let r = Repo::new("import-version");
+    let id = land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    let out = r.base.join("export");
+    r.ok(&["export", "--out", out.to_str().unwrap()]);
+    let path = out.join("gitstory-export.json");
+    let mut bundle: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    bundle["objects"][format!("stories/{id}/v1.json")]["version"] = json!(5);
+    fs::write(&path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+    let other = Repo::new("import-version-b");
+    let (code, v) = other.run(&["import", out.to_str().unwrap()]);
+    assert_ne!(code, 0, "{v}");
+    assert_eq!(v["error"]["code"], "E_USAGE", "{v}");
+}
