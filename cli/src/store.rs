@@ -141,12 +141,14 @@ pub fn link_time() -> i64 {
     use std::sync::atomic::{AtomicI64, Ordering};
     static LAST: AtomicI64 = AtomicI64::new(0);
     let now = gitstory_proto::id::now_ms();
-    let prev = LAST
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |last| {
-            Some(now.max(last + 1))
-        })
-        .expect("always Some");
-    now.max(prev + 1)
+    let mut last = LAST.load(Ordering::SeqCst);
+    loop {
+        let next = now.max(last + 1);
+        match LAST.compare_exchange(last, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
+    }
 }
 
 /// A repository's slice of the store.
