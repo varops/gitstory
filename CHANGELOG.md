@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- **Work unit lifecycle.** A work unit's state (`open`, `landed`, `reopened`) is now derived from its landings and its last activity, kept in `meta.json`:
+  - `land --since` no longer saves its range and session window, so later drafts and landings of the same work unit see new commits and sessions.
+  - A landing closes the round: reconciled drafts move to `drafts/landed/<sha>/`, applied `--supersedes` notes are cleared, and `--since` advances the work unit's base to the landed tip. The next landing no longer replays old drafts or adds a second `supersedes` link.
+  - `gc` no longer deletes work that arrived after a landing, and unlanded work expires from its last activity, not from when the work unit was created.
+  - Each landing keeps its own time.
+  - Work unit ids that map to the same local directory (`feat/a` and `feat_a`) are refused with `E_USAGE`.
+
+### Changed
+
+- `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.
+
 ## 0.0.1 — 2026-11-04
 
 The first public preview. Anything can change before v1, including commands, the `--json` schema and the story format.

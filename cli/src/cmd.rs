@@ -13,7 +13,7 @@ use gitstory_proto::story::{Claim, ClaimStatus, ClaimType, Stage, Story, StorySt
 use serde_json::{Value, json};
 
 use crate::adapters::{self, Ctx};
-use crate::collect::{self, WorkUnit};
+use crate::collect::{self, Scope, WorkUnit};
 use crate::config::{self, RepoConfig};
 use crate::error::{Context, Result};
 use crate::git::Repo;
@@ -226,26 +226,28 @@ pub fn note(
         let full = resolve_story(&idx, sid)?;
         if !wu.meta.supersedes.contains(&full) {
             wu.meta.supersedes.push(full);
-            wu.save_meta()?;
         }
     }
     wu.add_events(std::slice::from_ref(&ev))?;
+    wu.meta.touch(id::now_ms());
+    wu.save_meta()?;
     Ok(Out::new(
         json!({"work_unit": wu_id, "event": ev, "supersedes": wu.meta.supersedes}),
         format!("noted {} in work unit {wu_id}", ev.id),
     ))
 }
 
-/// Run every enabled adapter for the work unit. Returns new event count.
-fn gather(ws: &Workspace, wu: &mut WorkUnit) -> Result<usize> {
+/// Run every enabled adapter for the work unit over `scope`. Returns the
+/// new event count.
+fn gather(ws: &Workspace, wu: &mut WorkUnit, scope: &Scope) -> Result<usize> {
     let wid = wu.meta.work_unit.clone();
     let ctx = Ctx::new(ws, &wid);
-    let mut events: Vec<EvidenceEvent> = adapters::git(&ctx, wu)?;
+    let mut events: Vec<EvidenceEvent> = adapters::git(&ctx, wu, scope)?;
     if ws.cfg.collection.claude_code {
-        events.extend(adapters::claude_code(&ctx, wu)?);
+        events.extend(adapters::claude_code(&ctx, wu, scope)?);
     }
     if ws.cfg.collection.ghf {
-        events.extend(crate::ghf::traces(&ctx, wu)?);
+        events.extend(crate::ghf::traces(&ctx, wu, scope)?);
     }
     let n = wu.add_events(&events)?;
     wu.save_meta()?;
@@ -268,7 +270,8 @@ pub fn draft(env: &Env, work_unit: Option<String>, background: bool) -> Result<O
         ));
     }
     let mut wu = WorkUnit::open(&ws, &wu_id)?;
-    let new = gather(&ws, &mut wu)?;
+    let scope = Scope::of(&wu.meta);
+    let new = gather(&ws, &mut wu, &scope)?;
     let head = ws
         .repo
         .head()
@@ -305,9 +308,11 @@ pub fn draft(env: &Env, work_unit: Option<String>, background: bool) -> Result<O
         calls: gate.calls,
     };
     wu.put_egress(&manifest)?;
+    wu.save_meta()?;
     let mut story = result?;
     story.egress = egress_id;
     wu.put_draft(&story)?;
+    wu.save_meta()?;
     Ok(Out::new(
         json!({"story": story_view(env, &story), "work_unit": wu_id, "new_events": new, "events": events.len(), "egress": manifest}),
         render::markdown(&story),
@@ -374,22 +379,25 @@ pub fn land(
     }
     let mut wu = WorkUnit::open(&ws, &wu_id)?;
     let commit = ws.repo.commit(&sha)?;
-    // A run of commits pushed straight to main lands as one story.
-    let since = match &since {
+    // A run of commits pushed straight to main lands as one story. The
+    // range and its session window hold for this run only.
+    let (since, scope) = match &since {
         Some(r) => {
             let base = ws.require_commit(r)?;
             if base == sha || !ws.repo.is_ancestor(&base, &sha) {
                 fail!(Usage, "--since {r} must be an ancestor of {to}");
             }
             let start = ws.repo.commit(&base)?.time * 1000;
-            wu.meta.base_rev = Some(base.clone());
-            wu.meta.tip = Some(sha.clone());
-            wu.meta.window = Some((start, commit.time * 1000 + 10 * 60_000));
-            Some(base)
+            let scope = Scope {
+                base: Some(base.clone()),
+                tip: Some(sha.clone()),
+                window: Some((start, commit.time * 1000 + 10 * 60_000)),
+            };
+            (Some(base), scope)
         }
-        None => None,
+        None => (None, Scope::of(&wu.meta)),
     };
-    gather(&ws, &mut wu)?;
+    gather(&ws, &mut wu, &scope)?;
     let drafts = wu.drafts()?;
     let diff = match &since {
         Some(base) => ws.repo.range_diff(base, &sha)?,
@@ -402,6 +410,8 @@ pub fn land(
     let events = focus(wu.events()?, &landed_paths);
     let mut gate = Gate::new(&ws.cfg.egress);
     let ignored = ignored_fn(&ws, &wu_id);
+    // What this landing consumes; notes added meanwhile wait for the next.
+    let consumed_supersedes = wu.meta.supersedes.clone();
     let input = synth::Input {
         work_unit: &wu_id,
         repo: &ws.store.repo,
@@ -411,7 +421,7 @@ pub fn land(
         diff: &diff,
         drafts: &drafts,
         stage: Stage::Landed,
-        supersedes: wu.meta.supersedes.clone(),
+        supersedes: consumed_supersedes.clone(),
     };
     let egress_id = id::new_id(id::EGRESS);
     let result = synth::synthesize(&ws.cfg, &mut gate, &input, &ignored)
@@ -440,6 +450,7 @@ pub fn land(
         Ok(s) => s,
         Err(f) => {
             wu.put_egress(&manifest)?;
+            wu.save_meta()?;
             return Err(f);
         }
     };
@@ -492,8 +503,16 @@ pub fn land(
     };
     let proposals = propose_links(&ws, &story, &diff, &blame_base)?;
     crate::ghf::release(&Ctx::new(&ws, &wu_id), &mut wu);
-    wu.meta.landed.push((sha.clone(), story.story_id.clone()));
-    wu.meta.landed_at = Some(id::now_ms());
+    // Close the round: the next landing starts from here.
+    wu.meta
+        .record_landing(&sha, &story.story_id, id::now_ms())?;
+    wu.consume_drafts(&sha, &drafts)?;
+    wu.meta
+        .supersedes
+        .retain(|s| !consumed_supersedes.contains(s));
+    if since.is_some() {
+        wu.meta.base_rev = Some(sha.clone());
+    }
     wu.save_meta()?;
     let mut human = render::markdown(&story);
     let mut study_sheet = None;
@@ -1281,10 +1300,11 @@ pub fn status(env: &Env) -> Result<Out> {
     for wu in WorkUnit::all(&ws)? {
         let drafts = wu.drafts()?.len();
         let events = wu.events()?.len();
-        let expires_at = wu.meta.created_at + expiry;
-        if wu.meta.landed.is_empty() && now > expires_at - 7 * 86_400_000 {
+        let state = wu.meta.state();
+        let expires_at = wu.meta.expires_at(expiry);
+        if state != collect::State::Landed && now > expires_at - 7 * 86_400_000 {
             warnings.push(format!(
-                "work unit {} has not landed; its drafts expire {}",
+                "work unit {} has work that has not landed; it expires {}",
                 wu.meta.work_unit,
                 if now >= expires_at {
                     "now (run `git story gc`)".to_owned()
@@ -1293,7 +1313,7 @@ pub fn status(env: &Env) -> Result<Out> {
                 }
             ));
         }
-        units.push(json!({"work_unit": wu.meta.work_unit, "events": events, "drafts": drafts, "landed": wu.meta.landed, "created_at": wu.meta.created_at, "expires_at": expires_at}));
+        units.push(json!({"work_unit": wu.meta.work_unit, "state": state, "events": events, "drafts": drafts, "landed": wu.meta.landings(), "created_at": wu.meta.created_at, "last_activity": wu.meta.last_activity(), "expires_at": expires_at}));
     }
     let (endpoint, local) = model::endpoint(&ws.cfg.model);
     let trusted = local || config::trusted(&endpoint)?;
@@ -1356,11 +1376,9 @@ pub fn gc(env: &Env, dry_run: bool) -> Result<Out> {
     let expiry = ws.cfg.draft_expiry_ms();
     let mut removed = Vec::new();
     for wu in WorkUnit::all(&ws)? {
-        // Landed: the store keeps what the story cites; the rest goes.
-        // Never landed: drafts expire.
-        let done = wu.meta.landed_at.is_some_and(|t| now - t > 86_400_000);
-        let expired = wu.meta.landed.is_empty() && now >= wu.meta.created_at + expiry;
-        if done || expired {
+        // Landed and idle: the store keeps what the story cites; the rest
+        // goes. Unlanded work expires from its last activity.
+        if now >= wu.meta.expires_at(expiry) {
             removed.push(wu.meta.work_unit.clone());
             if !dry_run {
                 wu.remove()?;

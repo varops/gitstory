@@ -130,7 +130,9 @@ Data: `{story, work_unit, new_events, events, egress}`.
 
 Run after the work merges. `--to` (default `HEAD`) must be reachable from the main branch. Landing collects the evidence once more and reconciles the drafts against the landed diff. A claim the landed code does not reflect becomes `rejected` or `discarded`. Landing then validates the story and writes it to the store, with the cited events and the egress manifest. Notes with `--supersedes` become links. Blame on the lines the commit changed proposes further links.
 
-`--since REV` lands work that went straight to main as several commits: the story covers `REV..TO`, and session evidence counts only between `REV`'s commit time and ten minutes after `TO`.
+`--since REV` lands work that went straight to main as several commits: the story covers `REV..TO`, and session evidence counts only between `REV`'s commit time and ten minutes after `TO`. The range and the time window apply to that landing only and are never saved.
+
+A successful landing closes the work unit's round. The drafts it reconciled move to `drafts/landed/<sha>/` in the local collection, and the `--supersedes` notes it applied are cleared. After `--since`, the work unit's collection starts at `TO`. So the next landing of the same work unit (often `main`) starts fresh: it never replays earlier drafts or links. Drafts of a commit the work unit already landed are ignored.
 
 Before synthesis, session evidence is narrowed to the task behind the change. The task starts with the last request before the first session edit to a changed file, and earlier session events are dropped. This applies to `draft` too.
 
@@ -186,11 +188,18 @@ Data: `{written, unchanged, repository}`.
 
 ### `status`
 
-Store, model, egress policy and local work units, with warnings for drafts close to expiry and untrusted endpoints. Data: `{repository, store, stories, open_proposals, work_units[], model, egress, warnings[]}`.
+Store, model, egress policy and local work units, with warnings for unlanded work close to expiry and untrusted endpoints. Data: `{repository, store, stories, open_proposals, work_units[], model, egress, warnings[]}`.
+
+Each work unit is `{work_unit, state, events, drafts, landed[], created_at, last_activity, expires_at}`:
+
+- `state` is `open` (never landed), `landed` (landed, nothing new since) or `reopened` (landed, then new evidence, notes or drafts arrived).
+- `landed[]` lists every landing as `{commit, story, at}`.
+- `last_activity` is the time of the last new evidence, note or draft.
+- `expires_at` is when `gc` removes the local collection: a day after landing for a `landed` work unit, else `drafts.expire` after `last_activity`.
 
 ### `gc [--dry-run]`
 
-Removes local collection for work units that landed more than a day ago, and for work units that never landed and are past `drafts.expire`. Landed stories and their cited evidence stay in the store. Data: `{dry_run, removed[]}`.
+Removes the local collection of work units past their `expires_at` (see `status`): landed work units with nothing new for a day since they landed, and work units with unlanded work and no activity for `drafts.expire`. A work unit that got new evidence or drafts after it landed is kept like unlanded work. Landed stories and their cited evidence stay in the store. Data: `{dry_run, removed[]}`.
 
 ### `hooks install|uninstall|status claude-code|git [--scope project|local|user]`
 
@@ -266,7 +275,7 @@ expire = "30d"
 
 Everything local lives under the Git common directory, never in refs or the object store:
 
-- `.git/story/collect/<work-unit>/`: every collected event, drafts and draft egress manifests. Never shared.
+- `.git/story/collect/<work-unit>/`: every collected event, drafts and draft egress manifests, and `meta.json` with the work unit's landings and last activity. Never shared. Drafts a landing reconciled move to `drafts/landed/<sha>/`. The directory name is the work unit id with unsafe characters replaced by `_`, so two ids that map to the same directory (`feat/a` and `feat_a`) are refused with `E_USAGE`.
 - `.git/story/store/`: the default local store.
 - `.git/story/index.db`: the search index, rebuilt from the store when needed.
 - `.git/story/draft.log`: output of background drafts.

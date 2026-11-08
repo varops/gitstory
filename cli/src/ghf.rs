@@ -9,7 +9,7 @@ use gitstory_proto::evidence::{EventType, EvidenceEvent, SourceType};
 use serde_json::Value;
 
 use crate::adapters::Ctx;
-use crate::collect::WorkUnit;
+use crate::collect::{Scope, WorkUnit};
 use crate::error::Result;
 
 const HOLD: &str = "gitstory";
@@ -41,7 +41,7 @@ fn ghf(ctx: &Ctx, args: &[&str]) -> Option<Value> {
 
 /// Checkpoints of this worktree's traces, from the work unit's base onward,
 /// as attempt, test and abandon events. Holds each trace it reads.
-pub fn traces(ctx: &Ctx, wu: &mut WorkUnit) -> Result<Vec<EvidenceEvent>> {
+pub fn traces(ctx: &Ctx, wu: &mut WorkUnit, scope: &Scope) -> Result<Vec<EvidenceEvent>> {
     if !ctx.ws.repo.common_dir.join("ghf").is_dir() {
         return Ok(Vec::new());
     }
@@ -50,7 +50,10 @@ pub fn traces(ctx: &Ctx, wu: &mut WorkUnit) -> Result<Vec<EvidenceEvent>> {
     };
     // Commits in scope: the base and everything after it.
     let mut revs: HashSet<String> = HashSet::new();
-    if let (Some(base), Some(head)) = (&wu.meta.base_rev, ctx.ws.repo.head()) {
+    if let (Some(base), Some(head)) = (
+        &scope.base,
+        scope.tip.clone().or_else(|| ctx.ws.repo.head()),
+    ) {
         revs.insert(base.clone());
         revs.extend(ctx.ws.repo.commits_between(base, &head).unwrap_or_default());
     }

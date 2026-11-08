@@ -1,0 +1,352 @@
+//! Lifecycle state: work units, landing, links, proposals, verdicts and the
+//! other records whose state used to be spread across flags and files.
+//! Every test drives the real binary with the stand-in model.
+
+mod common;
+
+use std::fs;
+use std::path::PathBuf;
+
+use common::Repo;
+use serde_json::{Value, json};
+
+const DAY: i64 = 86_400_000;
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
+
+fn slug(w: &str) -> String {
+    w.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn wu_dir(r: &Repo, w: &str) -> PathBuf {
+    r.root.join(".git/story/collect").join(slug(w))
+}
+
+fn read_meta(r: &Repo, w: &str) -> Value {
+    serde_json::from_slice(&fs::read(wu_dir(r, w).join("meta.json")).unwrap()).unwrap()
+}
+
+fn write_meta(r: &Repo, w: &str, v: &Value) {
+    fs::write(
+        wu_dir(r, w).join("meta.json"),
+        serde_json::to_vec_pretty(v).unwrap(),
+    )
+    .unwrap();
+}
+
+/// Move every landing of a work unit `age` into the past, in whichever
+/// meta format the binary writes.
+fn backdate_landing(r: &Repo, w: &str, age: i64) {
+    let mut m = read_meta(r, w);
+    let t = now_ms() - age;
+    if m.get("landed_at").is_some() {
+        m["landed_at"] = json!(t);
+    }
+    if let Some(list) = m["landed"].as_array_mut() {
+        for l in list {
+            if l.is_object() {
+                l["at"] = json!(t);
+            }
+        }
+    }
+    write_meta(r, w, &m);
+}
+
+fn backdate_activity(r: &Repo, w: &str, age: i64) {
+    let mut m = read_meta(r, w);
+    let t = now_ms() - age;
+    m["created_at"] = json!(t);
+    if m.get("last_activity").is_some() {
+        m["last_activity"] = json!(t);
+    }
+    write_meta(r, w, &m);
+}
+
+fn store_dir(r: &Repo) -> PathBuf {
+    r.root.join(".git/story/store/repos/acme/demo")
+}
+
+/// Every entry of the link log, oldest first.
+fn link_log(r: &Repo) -> Vec<Value> {
+    let dir = store_dir(r).join("links");
+    let mut names: Vec<PathBuf> = fs::read_dir(&dir)
+        .map(|rd| rd.flatten().map(|e| e.path()).collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+        .iter()
+        .filter(|p| p.extension().is_some_and(|x| x == "json"))
+        .map(|p| serde_json::from_slice(&fs::read(p).unwrap()).unwrap())
+        .collect()
+}
+
+/// Land one branch with a note; returns the story id.
+fn land_branch(r: &Repo, branch: &str, file: &str, note: &[&str]) -> String {
+    r.git(&["checkout", "-qb", branch]);
+    r.write(file, &format!("{branch}\n"));
+    let mut args = vec!["note"];
+    args.extend_from_slice(note);
+    r.ok(&args);
+    r.commit_all(&format!("{branch} change"));
+    r.git(&["checkout", "-q", "main"]);
+    r.git(&[
+        "merge",
+        "-q",
+        "--no-ff",
+        branch,
+        "-m",
+        &format!("Merge {branch}"),
+    ]);
+    r.ok(&["land", "--work-unit", branch, "--to", "HEAD"])["story"]["story_id"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+fn claims(story: &Value, section: &str) -> String {
+    story[section]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|c| c["claim"].as_str().unwrap_or_default().to_owned())
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default()
+}
+
+// ---------------------------------------------------------------------------
+// 1. Work unit lifecycle
+
+/// `land --since` narrows one run only: later drafts of the same work unit
+/// see commits made after the landed tip.
+#[test]
+fn land_since_does_not_persist_tip_or_window() {
+    let r = Repo::new("since-scope");
+    let base = r.git(&["rev-parse", "HEAD"]);
+    r.write("one.rs", "1\n");
+    r.commit_all("Add one");
+    r.ok(&[
+        "note",
+        "Keep one file because it loads alone",
+        "--work-unit",
+        "run",
+    ]);
+    r.ok(&[
+        "land",
+        "--work-unit",
+        "run",
+        "--since",
+        &base,
+        "--to",
+        "HEAD",
+    ]);
+    let meta = read_meta(&r, "run");
+    assert!(meta.get("tip").is_none(), "tip saved: {meta}");
+    assert!(meta.get("window").is_none(), "window saved: {meta}");
+    r.write("three.rs", "3\n");
+    r.commit_all("Add three");
+    let d = r.ok(&["draft", "--work-unit", "run"]);
+    let decisions = claims(&d["story"], "decisions");
+    assert!(
+        decisions.contains("three.rs"),
+        "commit after the landed tip missing: {decisions}"
+    );
+}
+
+/// After a landing, the next landing of the same work unit starts a new
+/// round: earlier drafts and `note --supersedes` are not replayed.
+#[test]
+fn landing_closes_the_round() {
+    let r = Repo::new("round");
+    let a = land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    let base = r.git(&["rev-parse", "HEAD"]);
+    r.write("one.rs", "1\n");
+    let first = r.commit_all("Add one");
+    r.ok(&[
+        "note",
+        "Replace a with one because it is simpler",
+        "--work-unit",
+        "run",
+        "--supersedes",
+        &a,
+    ]);
+    r.ok(&["draft", "--work-unit", "run"]);
+    let s1 = r.ok(&[
+        "land",
+        "--work-unit",
+        "run",
+        "--since",
+        &base,
+        "--to",
+        "HEAD",
+    ]);
+    let s1 = s1["story"]["story_id"].as_str().unwrap().to_owned();
+    let meta = read_meta(&r, "run");
+    assert!(meta.get("supersedes").is_none(), "supersedes kept: {meta}");
+    assert_eq!(meta["base_rev"], first.as_str(), "base not advanced");
+    assert!(
+        wu_dir(&r, "run")
+            .join("drafts/landed")
+            .join(&first)
+            .is_dir(),
+        "consumed drafts not moved aside"
+    );
+
+    r.write("two.rs", "2\n");
+    r.commit_all("Add two");
+    r.ok(&[
+        "note",
+        "Add two because it loads late",
+        "--work-unit",
+        "run",
+    ]);
+    let s2 = r.ok(&[
+        "land",
+        "--work-unit",
+        "run",
+        "--since",
+        &first,
+        "--to",
+        "HEAD",
+    ]);
+    // No earlier drafts: a plain synthesis, not a reconciliation.
+    assert_eq!(s2["egress"]["calls"][0]["purpose"], "synthesis", "{s2}");
+    let s2 = s2["story"]["story_id"].as_str().unwrap().to_owned();
+    let log = link_log(&r);
+    let sup: Vec<&Value> = log
+        .iter()
+        .filter(|l| l["kind"] == "supersedes" && l["to"] == a.as_str())
+        .collect();
+    assert_eq!(sup.len(), 1, "supersedes replayed: {sup:?}");
+    assert_eq!(sup[0]["from"], s1.as_str());
+    assert_ne!(s1, s2);
+}
+
+/// gc removes a landed work unit only when nothing happened since it
+/// landed, and expires unlanded work from its last activity. `status`
+/// reports the same expiry gc acts on.
+#[test]
+fn gc_keeps_work_that_arrived_after_landing() {
+    let r = Repo::new("gc-activity");
+    land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    land_branch(&r, "feat/b", "b.rs", &["Add b because the cache needs it"]);
+    // feat/a gets new evidence after landing; feat/b stays idle.
+    r.ok(&[
+        "note",
+        "Keep a small because it ships in the boot image",
+        "--work-unit",
+        "feat/a",
+    ]);
+    backdate_landing(&r, "feat/a", 3 * DAY);
+    backdate_landing(&r, "feat/b", 3 * DAY);
+    backdate_activity(&r, "feat/b", 4 * DAY);
+    // Unlanded, created long ago, but active today.
+    r.ok(&[
+        "note",
+        "Try a ring buffer because allocation is slow",
+        "--work-unit",
+        "idea",
+    ]);
+    let mut m = read_meta(&r, "idea");
+    m["created_at"] = json!(now_ms() - 400 * DAY);
+    write_meta(&r, "idea", &m);
+
+    let status = r.ok(&["status"]);
+    let gc = r.ok(&["gc", "--dry-run"]);
+    let removed: Vec<&str> = gc["removed"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_str().unwrap())
+        .collect();
+    assert_eq!(removed, ["feat/b"], "{gc}");
+    let now = now_ms();
+    for u in status["work_units"].as_array().unwrap() {
+        let name = u["work_unit"].as_str().unwrap();
+        let expired = u["expires_at"].as_i64().unwrap() <= now;
+        assert_eq!(
+            expired,
+            removed.contains(&name),
+            "status and gc disagree on {name}: {u}"
+        );
+    }
+    r.ok(&["gc"]);
+    assert!(wu_dir(&r, "feat/a").join("meta.json").exists());
+    assert!(wu_dir(&r, "idea").join("meta.json").exists());
+    assert!(!wu_dir(&r, "feat/b").exists());
+}
+
+/// Meta written before landings carried their own time still loads.
+#[test]
+fn old_work_unit_meta_still_loads() {
+    let r = Repo::new("old-meta");
+    let head = r.git(&["rev-parse", "HEAD"]);
+    for d in ["events", "drafts", "egress"] {
+        fs::create_dir_all(wu_dir(&r, "legacy").join(d)).unwrap();
+    }
+    let landed_at = now_ms() - 3 * DAY;
+    write_meta(
+        &r,
+        "legacy",
+        &json!({
+            "work_unit": "legacy",
+            "created_at": landed_at - DAY,
+            "base_rev": head,
+            "offsets": {},
+            "landed": [[head, "st_old"]],
+            "landed_at": landed_at,
+            "tip": head,
+            "window": [0, 1],
+            "ghf_holds": ["tr_1"]
+        }),
+    );
+    let status = r.ok(&["status"]);
+    let u = status["work_units"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|u| u["work_unit"] == "legacy")
+        .unwrap()
+        .clone();
+    assert_eq!(u["landed"][0]["commit"], head.as_str(), "{u}");
+    assert_eq!(u["landed"][0]["story"], "st_old");
+    assert_eq!(u["landed"][0]["at"], landed_at);
+    assert_eq!(u["state"], "landed");
+    assert_eq!(r.ok(&["gc", "--dry-run"])["removed"], json!(["legacy"]));
+}
+
+/// `feat/a` and `feat_a` would share one local directory.
+#[test]
+fn work_unit_ids_that_share_a_directory_are_refused() {
+    let r = Repo::new("slug");
+    r.ok(&[
+        "note",
+        "Use a queue because jobs pile up",
+        "--work-unit",
+        "feat/a",
+    ]);
+    let (code, v) = r.run(&[
+        "note",
+        "Use a stack because order does not matter",
+        "--work-unit",
+        "feat_a",
+    ]);
+    assert_ne!(code, 0, "{v}");
+    assert_eq!(v["error"]["code"], "E_USAGE");
+    let msg = v["error"]["message"].as_str().unwrap();
+    assert!(msg.contains("feat/a") && msg.contains("feat_a"), "{msg}");
+}
