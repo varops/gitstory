@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "git-story"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "blake3",
  "clap",
@@ -421,7 +421,7 @@ dependencies = [
 
 [[package]]
 name = "gitstory-proto"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "getrandom 0.3.4",
  "serde",

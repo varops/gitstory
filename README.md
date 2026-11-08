@@ -3,7 +3,7 @@
 **Evidence-backed engineering memory for Git commits.**
 
 > [!IMPORTANT]
-> GitStory is an early preview (0.0.1). Anything can change before v1, including commands, the `--json` schema and the story format.
+> GitStory is an early preview (0.0.2). Anything can change before v1, including commands, the `--json` schema and the story format.
 
 GitStory keeps the "why" behind landed code. It collects evidence from agent sessions, tests, reviews and Git while work happens. It distills that evidence into a short record of decisions and checks every claim against the code that actually landed. The result is linked to the landed commit, so future agents and humans can ask why code looks the way it does, for a commit, a file or a line.
 
