@@ -403,6 +403,41 @@ pub fn land(
         Some(base) => ws.repo.range_diff(base, &sha)?,
         None => ws.repo.commit_diff(&sha)?,
     };
+    let blame_base = match &since {
+        Some(base) => vec![base.clone()],
+        None => commit.parents.clone(),
+    };
+    let idx = ws.index()?;
+    // What this landing consumes; notes added meanwhile wait for the next.
+    let consumed_supersedes = wu.meta.supersedes.clone();
+    let round = Round {
+        sha: &sha,
+        since: since.is_some(),
+        drafts: &drafts,
+        consumed_supersedes: &consumed_supersedes,
+    };
+
+    // This work unit already wrote a story for this commit: a retry after a
+    // later step failed, or the same landing run twice. Finish the steps
+    // after the story instead of writing a second one.
+    if let Some(found) = idx
+        .for_commits(std::slice::from_ref(&sha))?
+        .into_iter()
+        .find(|s| s.commit == sha && s.work_unit == wu_id && s.stage == Stage::Landed)
+    {
+        let story = ws
+            .store
+            .story(&found.story_id)?
+            .ok_or_else(|| err!(NotFound, "no story {}", found.story_id))?;
+        let (apply, skipped) = plan_links(&ws, &story)?;
+        let proposals = plan_proposals(&ws, &idx, &story, &diff, &blame_base)?;
+        finish_landing(&ws, &mut wu, &story, &round, &apply, &proposals)?;
+        let manifest = ws.store.egress(&story.egress)?;
+        return Ok(landed_out(
+            env, &story, proposals, manifest, None, true, &skipped,
+        ));
+    }
+
     let landed_paths: BTreeSet<String> = diff
         .iter()
         .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
@@ -410,8 +445,6 @@ pub fn land(
     let events = focus(wu.events()?, &landed_paths);
     let mut gate = Gate::new(&ws.cfg.egress);
     let ignored = ignored_fn(&ws, &wu_id);
-    // What this landing consumes; notes added meanwhile wait for the next.
-    let consumed_supersedes = wu.meta.supersedes.clone();
     let input = synth::Input {
         work_unit: &wu_id,
         repo: &ws.store.repo,
@@ -446,47 +479,96 @@ pub fn land(
         id: egress_id.clone(),
         calls: gate.calls,
     };
-    let mut story = match result {
-        Ok(s) => s,
+    // Every check that can fail runs before anything is written.
+    let checked = result.and_then(|mut story| {
+        story.egress = egress_id.clone();
+        story.contains = match &since {
+            Some(base) => ws
+                .repo
+                .commits_between(base, &sha)?
+                .into_iter()
+                .filter(|c| *c != sha)
+                .collect(),
+            None => ws.repo.merged_commits(&sha)?,
+        };
+        let (apply, skipped) = plan_links(&ws, &story)?;
+        story.supersedes.retain(|s| !skipped.contains(s));
+        let violations = story.violations();
+        if !violations.is_empty() {
+            fail!(
+                SynthesisInvalid,
+                "refusing to store an invalid story: {}",
+                violations.join("; ")
+            );
+        }
+        let proposals = plan_proposals(&ws, &idx, &story, &diff, &blame_base)?;
+        Ok((story, apply, skipped, proposals))
+    });
+    // Only the evidence the story cites goes to the shared store; the
+    // story is written last, so a story in the store means its evidence
+    // and manifest are there too.
+    let written = checked.and_then(|(story, apply, skipped, proposals)| {
+        let cited: HashSet<&str> = story
+            .claims()
+            .into_iter()
+            .flat_map(|(_, c)| c.evidence.iter().map(String::as_str))
+            .collect();
+        for e in events.iter().filter(|e| cited.contains(e.id.as_str())) {
+            ws.store.put_event(e)?;
+        }
+        ws.store.put_egress(&manifest)?;
+        ws.store.put_story(&story)?;
+        Ok((story, apply, skipped, proposals))
+    });
+    let (story, apply, skipped, proposals) = match written {
+        Ok(v) => v,
         Err(f) => {
+            // Data may have left: keep the manifest with the work unit.
             wu.put_egress(&manifest)?;
             wu.save_meta()?;
             return Err(f);
         }
     };
-    story.egress = egress_id;
-    story.contains = match &since {
-        Some(base) => ws
-            .repo
-            .commits_between(base, &sha)?
-            .into_iter()
-            .filter(|c| *c != sha)
-            .collect(),
-        None => ws.repo.merged_commits(&sha)?,
-    };
-    // Only the evidence the story cites goes to the shared store.
-    let cited: HashSet<&str> = story
-        .claims()
-        .into_iter()
-        .flat_map(|(_, c)| c.evidence.iter().map(String::as_str))
-        .collect();
-    for e in events.iter().filter(|e| cited.contains(e.id.as_str())) {
-        ws.store.put_event(e)?;
+    finish_landing(&ws, &mut wu, &story, &round, &apply, &proposals)?;
+    let mut study_sheet = None;
+    if let (Some(dir), Some(b)) = (&study_baseline, &baseline) {
+        study_sheet = Some(crate::study::write_sheet(dir, &story, &commit.subject, b)?);
     }
-    ws.store.put_egress(&manifest)?;
-    // Explicit supersedes from notes become links, after a cycle check.
+    Ok(landed_out(
+        env,
+        &story,
+        proposals,
+        Some(manifest),
+        study_sheet,
+        false,
+        &skipped,
+    ))
+}
+
+/// What a landing closes in its work unit.
+struct Round<'a> {
+    sha: &'a str,
+    /// Landed with `--since`: the next round starts at `sha`.
+    since: bool,
+    /// The drafts it reconciled.
+    drafts: &'a [Story],
+    /// The `note --supersedes` stories it applied.
+    consumed_supersedes: &'a [String],
+}
+
+/// The steps after the story is in the store, each safe to repeat: the
+/// story's `supersedes` links, link proposals, ghf holds and the work unit's
+/// landing record.
+fn finish_landing(
+    ws: &Workspace,
+    wu: &mut WorkUnit,
+    story: &Story,
+    round: &Round,
+    apply: &[String],
+    proposals: &[LinkProposal],
+) -> Result<()> {
     let author = ws.author();
-    let mut graph = index::link_graph(&ws.store)?;
-    for old in &story.supersedes {
-        if creates_cycle(&graph, &story.story_id, old) {
-            continue;
-        }
-        graph
-            .supersedes
-            .insert((story.story_id.clone(), old.clone()), ());
-    }
-    ws.store.put_story(&story)?;
-    for old in &story.supersedes {
+    for old in apply {
         ws.store.append_link(&LinkEntry {
             op: LinkOp::Add,
             kind: LinkKind::Supersedes,
@@ -497,29 +579,53 @@ pub fn land(
             proposal: None,
         })?;
     }
-    let blame_base = match &since {
-        Some(base) => vec![base.clone()],
-        None => commit.parents.clone(),
-    };
-    let proposals = propose_links(&ws, &story, &diff, &blame_base)?;
-    crate::ghf::release(&Ctx::new(&ws, &wu_id), &mut wu);
+    for p in proposals {
+        ws.store.put_proposal(p)?;
+    }
+    crate::ghf::release(&Ctx::new(ws, &story.work_unit), wu);
     // Close the round: the next landing starts from here.
     wu.meta
-        .record_landing(&sha, &story.story_id, id::now_ms())?;
-    wu.consume_drafts(&sha, &drafts)?;
+        .record_landing(round.sha, &story.story_id, id::now_ms())?;
+    wu.consume_drafts(round.sha, round.drafts)?;
     wu.meta
         .supersedes
-        .retain(|s| !consumed_supersedes.contains(s));
-    if since.is_some() {
-        wu.meta.base_rev = Some(sha.clone());
+        .retain(|s| !round.consumed_supersedes.contains(s));
+    if round.since {
+        wu.meta.base_rev = Some(round.sha.to_owned());
     }
-    wu.save_meta()?;
-    let mut human = render::markdown(&story);
-    let mut study_sheet = None;
-    if let (Some(dir), Some(b)) = (&study_baseline, &baseline) {
-        let path = crate::study::write_sheet(dir, &story, &commit.subject, b)?;
+    wu.save_meta()
+}
+
+fn landed_out(
+    env: &Env,
+    story: &Story,
+    proposals: Vec<LinkProposal>,
+    manifest: Option<EgressManifest>,
+    study_sheet: Option<PathBuf>,
+    resumed: bool,
+    skipped: &[String],
+) -> Out {
+    let cited: HashSet<&str> = story
+        .claims()
+        .into_iter()
+        .flat_map(|(_, c)| c.evidence.iter().map(String::as_str))
+        .collect();
+    let mut human = String::new();
+    if resumed {
+        human.push_str(&format!(
+            "{} was already in the store; finished landing it\n\n",
+            story.story_id
+        ));
+    }
+    human.push_str(&render::markdown(story));
+    if let Some(path) = &study_sheet {
         human.push_str(&format!("\nstudy: rating sheet {}\n", path.display()));
-        study_sheet = Some(path);
+    }
+    for old in skipped {
+        human.push_str(&format!(
+            "\nskipped: {} supersedes {old} would create a cycle",
+            story.story_id
+        ));
     }
     for p in &proposals {
         human.push_str(&format!(
@@ -527,16 +633,38 @@ pub fn land(
             p.from, p.kind, p.to, p.reason, p.id
         ));
     }
-    Ok(Out::new(
-        json!({"story": story_view(env, &story), "proposals": proposals, "cited_events": cited.len(), "egress": manifest, "study_sheet": study_sheet}),
+    Out::new(
+        json!({"story": story_view(env, story), "proposals": proposals, "cited_events": cited.len(), "egress": manifest, "study_sheet": study_sheet, "resumed": resumed, "skipped_links": skipped}),
         human,
-    ))
+    )
+}
+
+/// Split a story's `supersedes` into links to add and links skipped because
+/// they would close a cycle. Links already in force are neither.
+fn plan_links(ws: &Workspace, story: &Story) -> Result<(Vec<String>, Vec<String>)> {
+    let mut graph = index::link_graph(&ws.store)?;
+    let (mut apply, mut skipped) = (Vec::new(), Vec::new());
+    for old in &story.supersedes {
+        let key = (story.story_id.clone(), old.clone());
+        if graph.supersedes.contains_key(&key) {
+            continue;
+        }
+        if creates_cycle(&graph, &story.story_id, old) {
+            skipped.push(old.clone());
+            continue;
+        }
+        graph.supersedes.insert(key, ());
+        apply.push(old.clone());
+    }
+    Ok((apply, skipped))
 }
 
 /// Blame the lines the landed commit changed (in its parent) and propose
-/// `supersedes` links to the stories behind them. Never applied on its own.
-fn propose_links(
+/// `supersedes` links to the stories behind them. Never applied on its own,
+/// and nothing is written here.
+fn plan_proposals(
     ws: &Workspace,
+    idx: &Index,
     story: &Story,
     diff: &[crate::git::FileDiff],
     parents: &[String],
@@ -544,7 +672,6 @@ fn propose_links(
     let Some(parent) = parents.first() else {
         return Ok(Vec::new());
     };
-    let idx = ws.index()?;
     let existing: HashSet<(String, String)> = ws
         .store
         .proposals()?
@@ -578,7 +705,7 @@ fn propose_links(
         {
             continue;
         }
-        let p = LinkProposal {
+        out.push(LinkProposal {
             id: id::new_id(id::PROPOSAL),
             kind: LinkKind::Supersedes,
             from: story.story_id.clone(),
@@ -586,9 +713,7 @@ fn propose_links(
             reason,
             status: ProposalStatus::Open,
             at: id::now_ms(),
-        };
-        ws.store.put_proposal(&p)?;
-        out.push(p);
+        });
     }
     Ok(out)
 }

@@ -11,9 +11,13 @@
   - Each landing keeps its own time.
   - Work unit ids that map to the same local directory (`feat/a` and `feat_a`) are refused with `E_USAGE`.
 
+- **Landing is safe to retry.** `land` runs every check that can fail (story rules, blame and link proposals) before it writes anything. When a later step fails, running `land` again finishes the existing story instead of writing a second one for the same commit, which made `validate` and `edit` fail with `E_AMBIGUOUS`.
+- **Supersedes cycles.** A `note --supersedes` link that would create a cycle is now skipped at landing and reported. Before, the cycle check had no effect.
+
 ### Changed
 
 - `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.
+- `land --json` adds `resumed` and `skipped_links`.
 
 ## 0.0.1 — 2026-11-04
 

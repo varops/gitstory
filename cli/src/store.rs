@@ -206,6 +206,10 @@ impl Store {
         self.put_json(&format!("egress/{}.json", m.id), m)
     }
 
+    pub fn egress(&self, id: &str) -> Result<Option<EgressManifest>> {
+        self.get_json(&format!("egress/{id}.json"))
+    }
+
     // -- links, proposals ---------------------------------------------------------
 
     pub fn append_link(&self, l: &LinkEntry) -> Result<()> {

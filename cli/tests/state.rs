@@ -350,3 +350,120 @@ fn work_unit_ids_that_share_a_directory_are_refused() {
     let msg = v["error"]["message"].as_str().unwrap();
     assert!(msg.contains("feat/a") && msg.contains("feat_a"), "{msg}");
 }
+
+// ---------------------------------------------------------------------------
+// 2. Landing phases and idempotence
+
+/// Make every link write fail: a plain file where the link log directory goes.
+fn break_link_log(r: &Repo) {
+    let dir = store_dir(r).join("links");
+    if dir.is_dir() {
+        fs::remove_dir_all(&dir).unwrap();
+    }
+    fs::create_dir_all(dir.parent().unwrap()).unwrap();
+    fs::write(&dir, "not a directory").unwrap();
+}
+
+fn fix_link_log(r: &Repo) {
+    let dir = store_dir(r).join("links");
+    if dir.is_file() {
+        fs::remove_file(&dir).unwrap();
+    }
+}
+
+fn stories_for_commit(r: &Repo, sha: &str) -> usize {
+    fs::read_dir(store_dir(r).join("commits").join(sha))
+        .map(|rd| rd.count())
+        .unwrap_or(0)
+}
+
+/// A landing that failed after writing its story finishes on retry instead
+/// of writing a second story for the same commit; landing again is a no-op.
+#[test]
+fn land_retry_finishes_instead_of_duplicating() {
+    let r = Repo::new("land-retry");
+    let a = land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    r.git(&["checkout", "-qb", "feat/b"]);
+    r.write("b.rs", "b\n");
+    r.ok(&[
+        "note",
+        "Replace a with b because b is simpler",
+        "--supersedes",
+        &a,
+    ]);
+    r.commit_all("Add b");
+    r.git(&["checkout", "-q", "main"]);
+    r.git(&["merge", "-q", "--no-ff", "feat/b", "-m", "Merge feat/b"]);
+    let sha = r.git(&["rev-parse", "HEAD"]);
+
+    break_link_log(&r);
+    let (code, v) = r.run(&["land", "--work-unit", "feat/b", "--to", "HEAD"]);
+    assert_ne!(
+        code, 0,
+        "land should fail while links cannot be written: {v}"
+    );
+    fix_link_log(&r);
+
+    let again = r.ok(&["land", "--work-unit", "feat/b", "--to", "HEAD"]);
+    assert_eq!(again["resumed"], true, "{again}");
+    assert_eq!(
+        stories_for_commit(&r, &sha),
+        1,
+        "a second story was written"
+    );
+    let id = again["story"]["story_id"].as_str().unwrap().to_owned();
+    assert_eq!(r.ok(&["validate", "HEAD"])["story"], id.as_str());
+    let log = link_log(&r);
+    assert!(
+        log.iter()
+            .any(|l| l["from"] == id.as_str() && l["to"] == a.as_str()),
+        "the supersedes link was not finished: {log:?}"
+    );
+    // Landing the same commit once more changes nothing.
+    let third = r.ok(&["land", "--work-unit", "feat/b", "--to", "HEAD"]);
+    assert_eq!(third["story"]["story_id"], id.as_str());
+    assert_eq!(stories_for_commit(&r, &sha), 1);
+    assert_eq!(link_log(&r).len(), log.len());
+    assert_eq!(
+        read_meta(&r, "feat/b")["landed"].as_array().unwrap().len(),
+        1
+    );
+}
+
+/// A `supersedes` note that would close a cycle is skipped and reported.
+#[test]
+fn land_skips_and_reports_a_supersedes_cycle() {
+    let r = Repo::new("land-cycle");
+    let a = land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    r.git(&["checkout", "-qb", "feat/b"]);
+    r.write("b.rs", "b\n");
+    r.ok(&[
+        "note",
+        "Replace a with b because b is simpler",
+        "--supersedes",
+        &a,
+    ]);
+    r.commit_all("Add b");
+    r.git(&["checkout", "-q", "main"]);
+    r.git(&["merge", "-q", "--no-ff", "feat/b", "-m", "Merge feat/b"]);
+
+    break_link_log(&r);
+    let (code, _) = r.run(&["land", "--work-unit", "feat/b", "--to", "HEAD"]);
+    assert_ne!(code, 0);
+    fix_link_log(&r);
+    // Meanwhile someone links the other way round.
+    let b = r.ok(&["show", "HEAD"])["stories"][0]["story_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    r.ok(&["link", &a, "--supersedes", &b]);
+
+    let again = r.ok(&["land", "--work-unit", "feat/b", "--to", "HEAD"]);
+    assert_eq!(again["skipped_links"], json!([a]), "{again}");
+    assert!(
+        !link_log(&r)
+            .iter()
+            .any(|l| l["from"] == b.as_str() && l["to"] == a.as_str()),
+        "the cycle was written"
+    );
+}
