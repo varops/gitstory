@@ -96,10 +96,52 @@ pub struct LinkProposal {
     pub at: i64,
 }
 
+/// Why a model call was made. Stored as its string in
+/// [`EgressCall::purpose`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Purpose {
+    /// Building a story (a draft, or a landing with no drafts).
+    Synthesis,
+    /// Landing: reconciling drafts against the landed diff.
+    Reconciliation,
+    /// Checking claims against their evidence.
+    Validation,
+    /// Rewriting partly supported claims from their own evidence.
+    Repair,
+    /// Checking the repaired claims.
+    Revalidation,
+    /// The M0 study's control arm (`land --study-baseline`).
+    StudyBaseline,
+}
+
+impl Purpose {
+    pub const ALL: &'static [Purpose] = &[
+        Self::Synthesis,
+        Self::Reconciliation,
+        Self::Validation,
+        Self::Repair,
+        Self::Revalidation,
+        Self::StudyBaseline,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Synthesis => "synthesis",
+            Self::Reconciliation => "reconciliation",
+            Self::Validation => "validation",
+            Self::Repair => "repair",
+            Self::Revalidation => "revalidation",
+            Self::StudyBaseline => "study_baseline",
+        }
+    }
+}
+
 /// What one outbound model request carried.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EgressCall {
-    /// `synthesis`, `validation` or `reconciliation`.
+    /// A [`Purpose`]: `synthesis`, `reconciliation`, `validation`,
+    /// `repair`, `revalidation` or `study_baseline`. Kept as a string so
+    /// manifests from newer versions still load.
     pub purpose: String,
     pub provider: String,
     pub endpoint: String,

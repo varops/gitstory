@@ -609,6 +609,9 @@ fn finish_landing(
     for p in proposals {
         ws.store.put_proposal(p)?;
     }
+    // Drafts and failed landings sent data too: their manifests go to the
+    // store with the landed one.
+    wu.upload_egress(&ws.store)?;
     let released = crate::ghf::release(&Ctx::new(ws, &story.work_unit), wu);
     wu.consume_drafts(round.sha, round.drafts)?;
     // Close the round on the meta as it is now, not as it was when landing
@@ -1632,31 +1635,48 @@ pub fn gc(env: &Env, dry_run: bool) -> Result<Out> {
     let now = id::now_ms();
     let expiry = ws.cfg.draft_expiry_ms();
     let mut removed = Vec::new();
+    let mut warnings = Vec::new();
     for wu in WorkUnit::all(&ws)? {
         // Landed and idle: the store keeps what the story cites; the rest
         // goes. Unlanded work expires from its last activity.
         if now >= wu.meta.expires_at(expiry) {
-            removed.push(wu.meta.work_unit.clone());
             if !dry_run {
+                // A manifest records data that may have left this machine:
+                // it goes to the store first, or the work unit stays.
+                if let Err(f) = wu.upload_egress(&ws.store) {
+                    warnings.push(format!(
+                        "kept work unit {}: its egress manifests could not be uploaded ({})",
+                        wu.meta.work_unit, f.message
+                    ));
+                    continue;
+                }
                 // Its traces need no protection once its collection is gone.
                 if !wu.meta.ghf_holds.is_empty() {
                     crate::ghf::release(&Ctx::new(&ws, &wu.meta.work_unit), &wu);
                 }
+                let name = wu.meta.work_unit.clone();
                 wu.remove()?;
+                removed.push(name);
+            } else {
+                removed.push(wu.meta.work_unit.clone());
             }
         }
     }
+    let mut human = if removed.is_empty() {
+        "nothing to collect".to_owned()
+    } else {
+        format!(
+            "{} {}",
+            if dry_run { "would remove" } else { "removed" },
+            removed.join(", ")
+        )
+    };
+    for w in &warnings {
+        human.push_str(&format!("\nwarning: {w}"));
+    }
     Ok(Out::new(
-        json!({"dry_run": dry_run, "removed": removed}),
-        if removed.is_empty() {
-            "nothing to collect".to_owned()
-        } else {
-            format!(
-                "{} {}",
-                if dry_run { "would remove" } else { "removed" },
-                removed.join(", ")
-            )
-        },
+        json!({"dry_run": dry_run, "removed": removed, "warnings": warnings}),
+        human,
     ))
 }
 

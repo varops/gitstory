@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use gitstory_proto::evidence::{EventType, EvidenceEvent};
 use gitstory_proto::id;
-use gitstory_proto::record::HunkRef;
+use gitstory_proto::record::{HunkRef, Purpose};
 use gitstory_proto::story::{
     Claim, ClaimStatus, ClaimType, Review, STORY_SCHEMA, Stage, Story, StoryStatus,
 };
@@ -165,7 +165,7 @@ pub(crate) fn gated_bundle(
     (
         json!({"events": evs, "diff": files}),
         Sent {
-            purpose: "",
+            purpose: Purpose::Synthesis,
             event_ids: ids,
             hunks,
             excerpts,
@@ -347,9 +347,9 @@ pub fn synthesize(
     let landing = input.stage == Stage::Landed && !input.drafts.is_empty();
     let (bundle, mut sent) = gated_bundle(cfg, input.events, input.diff, ignored);
     sent.purpose = if landing {
-        "reconciliation"
+        Purpose::Reconciliation
     } else {
-        "synthesis"
+        Purpose::Synthesis
     };
     let mut user = json!({
         "work_unit": input.work_unit,
@@ -617,7 +617,7 @@ fn judge(
     cited: &BTreeSet<String>,
     diff: &[FileDiff],
     ignored: &dyn Fn(&str) -> bool,
-    purpose: &'static str,
+    purpose: Purpose,
 ) -> Result<Vec<(Verdict, String)>> {
     let excerpts = cfg.egress.send_excerpts && cfg.collection.excerpts == "on";
     // The commit's diff is durable too: it lives in Git. It is what proves
@@ -754,7 +754,15 @@ pub fn validate_logged(
     // supported (see `judge`).
     let has_model = !items.is_empty() && cfg.validation_model().provider != "none";
     let mut verdict: Vec<(Verdict, String)> = if has_model {
-        judge(cfg, gate, &claims, &cited, diff, ignored, "validation")?
+        judge(
+            cfg,
+            gate,
+            &claims,
+            &cited,
+            diff,
+            ignored,
+            Purpose::Validation,
+        )?
     } else {
         vec![(Verdict::Yes, String::new()); items.len()]
     };
@@ -803,7 +811,7 @@ pub fn validate_logged(
             max_tokens: 8_000,
         };
         let sent = Sent {
-            purpose: "repair",
+            purpose: Purpose::Repair,
             event_ids: cited.iter().cloned().collect(),
             hunks: gated.hunks,
             excerpts,
@@ -832,7 +840,15 @@ pub fn validate_logged(
                     ..claims[*i].clone()
                 })
                 .collect();
-            let second = judge(cfg, gate, &again, &cited, diff, ignored, "revalidation")?;
+            let second = judge(
+                cfg,
+                gate,
+                &again,
+                &cited,
+                diff,
+                ignored,
+                Purpose::Revalidation,
+            )?;
             for ((i, text), (sup, _)) in rewrites.into_iter().zip(second) {
                 let (si, ci) = items[i];
                 let rewritten = Claim {

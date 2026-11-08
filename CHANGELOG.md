@@ -29,12 +29,15 @@
 - **Story versions on a shared store.** Each `stories/<id>/vN.json` is now written create-only (`create_new` on the local store, `If-None-Match: *` on S3). Two concurrent `edit`s no longer silently replace one version with the other; the second fails with `E_STORE_CONFLICT` and can be run again.
 - **Import checks stories.** `import` refuses a story that breaks the story rules or whose id or version does not match its key.
 
+- **Egress manifests.** The manifests of drafts and failed landings now go to the store with the next successful landing, and `gc` uploads any that are left before removing a work unit (or keeps the work unit if it cannot). Before, `gc` deleted them although their data may have left the machine. The `repair`, `revalidation` and `study_baseline` purposes are now documented.
+
 ### Changed
 
 - `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.
 - `land --json` adds `resumed` and `skipped_links`.
 - `link --json` adds `withdrawn` when removing a link withdraws its proposal. Accepting an already accepted proposal now succeeds without change instead of failing with `E_USAGE`.
 - `validate --json` adds `repairs[]`: claims that hold once reworded, as `{from, to}`.
+- `gc --json` adds `warnings[]`.
 - `export` adds a `stories` list to `gitstory-export.json`: each current story as commands show it. `objects` is unchanged, and bundles without `stories` still import.
 
 ## 0.0.1 — 2026-11-04

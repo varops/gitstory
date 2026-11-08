@@ -525,7 +525,7 @@ pub fn baseline(
     ignored: &dyn Fn(&str) -> bool,
 ) -> Result<String> {
     let (bundle, mut sent) = synth::gated_bundle(cfg, input.events, input.diff, ignored);
-    sent.purpose = "study_baseline";
+    sent.purpose = gitstory_proto::record::Purpose::StudyBaseline;
     let user = json!({
         "commit": {"sha": input.commit, "subject": scrub::scrub(input.commit_subject).0},
         "events": bundle["events"],

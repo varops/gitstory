@@ -95,7 +95,7 @@ An **evidence event** has a durable part that is stored with the story, and an o
  "external": {"pointer": "claude-code:<session>#L42"}, "paths": ["src/lock.rs"]}
 ```
 
-An **egress manifest** (`egr_…`) lists each model call: `purpose` (`synthesis`, `reconciliation` or `validation`), `provider`, `endpoint`, `model`, `local`, `at`, the `event_ids` sent, the diff `hunks` sent (path and hash), whether `excerpts` were sent, and the request size in `bytes`. A call is recorded before it is sent, so a failed call still appears.
+An **egress manifest** (`egr_…`) lists each model call: `purpose` (`synthesis`, `reconciliation`, `validation`, `repair`, `revalidation` or `study_baseline`), `provider`, `endpoint`, `model`, `local`, `at`, the `event_ids` sent, the diff `hunks` sent (path and hash), whether `excerpts` were sent, and the request size in `bytes`. A call is recorded before it is sent, so a failed call still appears. `repair` rewrites partly supported claims and `revalidation` checks the rewrites; `study_baseline` is the M0 study's control arm.
 
 A **link proposal** (`lp_…`) has `kind` (`supersedes` or `related`), `from`, `to`, `reason` and `status`: `open`, `accepted`, `rejected` or `withdrawn`. The only moves are `open` to `accepted` or `rejected`, and `accepted` to `withdrawn` (its link was removed). `accepted`, `rejected` and `withdrawn` are final.
 
@@ -122,7 +122,7 @@ Records a note as stated evidence in the work unit. `--supersedes` marks the sto
 
 ### `draft [--work-unit W] [--background]`
 
-Collects evidence from Git, Claude Code session logs and ghf (when enabled), builds a draft against `HEAD` and validates it. Each ghf trace it reads gets a `gitstory` hold for 30 days, renewed by any collection once it is older than a week, and released when the work unit lands or `gc` removes it. Drafts and their egress manifests stay in the local collection. `--background` returns at once and drafts in a detached process; output goes to `.git/story/draft.log`.
+Collects evidence from Git, Claude Code session logs and ghf (when enabled), builds a draft against `HEAD` and validates it. Each ghf trace it reads gets a `gitstory` hold for 30 days, renewed by any collection once it is older than a week, and released when the work unit lands or `gc` removes it. Drafts and their egress manifests stay in the local collection until the work unit lands; the next successful landing uploads every manifest kept there (drafts and failed landings) to the store. `--background` returns at once and drafts in a detached process; output goes to `.git/story/draft.log`.
 
 Data: `{story, work_unit, new_events, events, egress}`.
 
@@ -211,7 +211,7 @@ Each work unit is `{work_unit, state, events, drafts, landed[], created_at, last
 
 ### `gc [--dry-run]`
 
-Removes the local collection of work units past their `expires_at` (see `status`): landed work units with nothing new for a day since they landed, and work units with unlanded work and no activity for `drafts.expire`. A work unit that got new evidence or drafts after it landed is kept like unlanded work. Landed stories and their cited evidence stay in the store. Data: `{dry_run, removed[]}`.
+Removes the local collection of work units past their `expires_at` (see `status`): landed work units with nothing new for a day since they landed, and work units with unlanded work and no activity for `drafts.expire`. A work unit that got new evidence or drafts after it landed is kept like unlanded work. Landed stories and their cited evidence stay in the store. Before removing a work unit, `gc` uploads its remaining egress manifests to the store, since their data may have left the machine; if that fails, the work unit is kept and a warning says why. Data: `{dry_run, removed[], warnings[]}`.
 
 ### `hooks install|uninstall|status claude-code|git [--scope project|local|user]`
 

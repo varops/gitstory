@@ -887,3 +887,72 @@ fn import_refuses_a_story_under_the_wrong_version() {
     assert_ne!(code, 0, "{v}");
     assert_eq!(v["error"]["code"], "E_USAGE", "{v}");
 }
+
+// ---------------------------------------------------------------------------
+// 9. Egress manifests
+
+fn manifest_ids(dir: &PathBuf) -> Vec<String> {
+    let mut v: Vec<String> = fs::read_dir(dir)
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+                .filter_map(|e| {
+                    e.file_name()
+                        .to_str()?
+                        .strip_suffix(".json")
+                        .map(str::to_owned)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort();
+    v
+}
+
+/// A landing uploads the manifests of the work unit's drafts too.
+#[test]
+fn landing_uploads_draft_manifests() {
+    let r = Repo::new("egress-upload");
+    r.git(&["checkout", "-qb", "feat/a"]);
+    r.write("a.rs", "a\n");
+    r.ok(&["note", "Add a because the queue needs it"]);
+    r.commit_all("Add a");
+    let d = r.ok(&["draft"]);
+    let draft_manifest = d["egress"]["id"].as_str().unwrap().to_owned();
+    r.git(&["checkout", "-q", "main"]);
+    r.git(&["merge", "-q", "--no-ff", "feat/a", "-m", "Merge feat/a"]);
+    r.ok(&["land", "--work-unit", "feat/a", "--to", "HEAD"]);
+    let stored = manifest_ids(&store_dir(&r).join("egress"));
+    assert!(stored.contains(&draft_manifest), "{stored:?}");
+    assert!(manifest_ids(&wu_dir(&r, "feat/a").join("egress")).is_empty());
+}
+
+/// gc never deletes a manifest that has not reached the store.
+#[test]
+fn gc_keeps_manifests_until_uploaded() {
+    let r = Repo::new("egress-gc");
+    r.git(&["checkout", "-qb", "feat/a"]);
+    r.write("a.rs", "a\n");
+    r.ok(&["note", "Add a because the queue needs it"]);
+    r.commit_all("Add a");
+    let d = r.ok(&["draft"]);
+    let id = d["egress"]["id"].as_str().unwrap().to_owned();
+    backdate_activity(&r, "feat/a", 400 * DAY);
+    // The store cannot take manifests right now.
+    let egress = store_dir(&r).join("egress");
+    fs::create_dir_all(egress.parent().unwrap()).unwrap();
+    fs::write(&egress, "not a directory").unwrap();
+    let gc = r.ok(&["gc"]);
+    assert!(
+        wu_dir(&r, "feat/a")
+            .join("egress")
+            .join(format!("{id}.json"))
+            .exists(),
+        "manifest deleted before upload: {gc}"
+    );
+    assert!(!gc["warnings"].as_array().unwrap().is_empty(), "{gc}");
+    fs::remove_file(&egress).unwrap();
+    let gc = r.ok(&["gc"]);
+    assert_eq!(gc["removed"], json!(["feat/a"]), "{gc}");
+    assert!(manifest_ids(&egress).contains(&id));
+}

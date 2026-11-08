@@ -487,6 +487,25 @@ impl WorkUnit {
         Ok(())
     }
 
+    /// Upload the manifests kept here (drafts, failed landings) to the
+    /// store, deleting each local copy once the store has it. A manifest
+    /// that fails to upload stays.
+    pub fn upload_egress(&self, store: &crate::store::Store) -> Result<usize> {
+        let mut n = 0;
+        for e in fs::read_dir(self.dir.join("egress"))?.flatten() {
+            let path = e.path();
+            if path.extension().is_none_or(|x| x != "json") {
+                continue;
+            }
+            let m: EgressManifest = serde_json::from_slice(&fs::read(&path)?)
+                .map_err(|err| crate::err!(Internal, "corrupt {}: {err}", path.display()))?;
+            store.put_egress(&m)?;
+            fs::remove_file(&path)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
     pub fn remove(self) -> Result<()> {
         fs::remove_dir_all(&self.dir)?;
         Ok(())
