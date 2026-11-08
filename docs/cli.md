@@ -162,7 +162,11 @@ Full-text search over summaries, claims, goals and paths. Terms are combined wit
 
 Re-checks a landed story using only durable evidence: the durable parts of the events it cites, and the commit's diff from Git. Session logs, CI links and ghf traces may be gone. Nothing is changed; any model call is recorded in a new egress manifest.
 
-Data: `{story, valid, unsupported[], missing_events[], egress}`.
+It runs the same validation as landing, repair step included. A partly supported claim that the repair step rewrote into a supported one holds, and is listed in `repairs[]` as `{from, to}`; the stored story is not changed. A claim that does not hold is listed in `unsupported[]`.
+
+The checker's verdict is read without regard to case. A verdict other than `yes`, `partly` or `no`, like a missing one, counts as not judged (`partly`), so a provider that does not enforce the response schema never gets a claim through by accident.
+
+Data: `{story, valid, unsupported[], repairs[], missing_events[], egress}`.
 
 ### `link STORY --supersedes|--related OTHER [--remove]` · `link --accept|--reject PROPOSAL`
 

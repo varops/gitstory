@@ -43,6 +43,12 @@ if "verdicts" in req["schema"]["properties"]:
     for c in user["claims"]:
         text = c["claim"]
         sup = "no" if "UNSUPPORTED" in text else "partly" if "MAYBE" in text else "yes"
+        if os.environ.get("MOCK_VERDICTS") == "upper":
+            # A provider that ignores the schema's casing.
+            sup = sup.upper()
+        elif os.environ.get("MOCK_VERDICTS") == "odd":
+            # A provider that ignores the schema's enum altogether.
+            sup = "probably"
         out.append({"index": c["index"], "claim": text, "supported": sup, "note": ""})
     if os.environ.get("MOCK_VERDICTS") == "swap" and len(out) > 1:
         # A model that mixes up indexes but echoes the right claims.

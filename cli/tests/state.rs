@@ -644,3 +644,58 @@ fn removing_an_accepted_link_withdraws_its_proposal() {
     assert_eq!(r.ok(&["show", &a])["stories"][0]["status"], "current");
     assert_eq!(r.err(&["link", "--accept", &pid]), "E_USAGE");
 }
+
+// ---------------------------------------------------------------------------
+// 5. Validation verdicts
+
+fn run_env(r: &Repo, env: &[(&str, &str)], args: &[&str]) -> Value {
+    let mut c = r.cmd();
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let out = c.args(args).arg("--json").output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    v["data"].clone()
+}
+
+fn draft_with_verdicts(name: &str, mode: &str) -> Value {
+    let r = Repo::new(name);
+    r.git(&["checkout", "-qb", "feat/v"]);
+    r.write("a.rs", "a\n");
+    r.ok(&["note", "Keep a small because it ships in the boot image"]);
+    r.commit_all("Add a");
+    run_env(&r, &[("MOCK_VERDICTS", mode)], &["draft"])["story"].clone()
+}
+
+/// A verdict outside yes/partly/no does not count as supported.
+#[test]
+fn unrecognized_verdicts_are_not_supported() {
+    let s = draft_with_verdicts("verdict-odd", "odd");
+    assert_eq!(claims(&s, "decisions"), "", "{s}");
+    assert!(claims(&s, "hypotheses").contains("Changed a.rs"));
+}
+
+/// Verdicts are read without regard to case.
+#[test]
+fn verdicts_ignore_case() {
+    let s = draft_with_verdicts("verdict-upper", "upper");
+    let d = claims(&s, "decisions");
+    assert!(!d.contains("UNSUPPORTED"), "a NO verdict was kept: {d}");
+    assert!(d.contains("Changed a.rs"), "a YES verdict was dropped: {d}");
+}
+
+/// `validate` counts a claim the repair step fixed as valid and lists it.
+#[test]
+fn validate_accepts_repaired_claims() {
+    let r = Repo::new("validate-repair");
+    let id = land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    r.ok(&["edit", &id, "--add-decision", "MAYBE keep a small"]);
+    let v = r.ok(&["validate", &id]);
+    assert_eq!(v["valid"], true, "{v}");
+    assert_eq!(v["unsupported"], json!([]));
+    assert_eq!(
+        v["repairs"],
+        json!([{"from": "MAYBE keep a small", "to": "keep a small"}])
+    );
+}

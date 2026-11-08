@@ -1013,7 +1013,8 @@ pub fn validate(env: &Env, rev: String) -> Result<Out> {
     .unwrap_or_default();
     let ignored = ignored_fn(&ws, &s.work_unit);
     let mut gate = Gate::new(&ws.cfg.egress);
-    let checked = synth::validate(&ws.cfg, &mut gate, s.clone(), &events, &diff, &ignored)?;
+    let (checked, log) =
+        synth::validate_logged(&ws.cfg, &mut gate, s.clone(), &events, &diff, &ignored)?;
     let manifest = EgressManifest {
         id: id::new_id(id::EGRESS),
         calls: gate.calls,
@@ -1021,6 +1022,7 @@ pub fn validate(env: &Env, rev: String) -> Result<Out> {
     if !manifest.calls.is_empty() {
         ws.store.put_egress(&manifest)?;
     }
+    // A claim the repair step rewrote into one its evidence supports holds.
     let kept: HashSet<&str> = checked
         .decisions
         .iter()
@@ -1028,6 +1030,7 @@ pub fn validate(env: &Env, rev: String) -> Result<Out> {
         .chain(&checked.discarded)
         .chain(&checked.evidence_summary)
         .map(|c| c.claim.as_str())
+        .chain(log.repairs.iter().map(|r| r.from.as_str()))
         .collect();
     let failed: Vec<&str> = s
         .decisions
@@ -1053,8 +1056,11 @@ pub fn validate(env: &Env, rev: String) -> Result<Out> {
     for m in &missing {
         human.push_str(&format!("\n  missing evidence: {m}"));
     }
+    for r in &log.repairs {
+        human.push_str(&format!("\n  holds as reworded: {} -> {}", r.from, r.to));
+    }
     Ok(Out::new(
-        json!({"story": id, "valid": ok, "unsupported": failed, "missing_events": missing, "egress": manifest}),
+        json!({"story": id, "valid": ok, "unsupported": failed, "repairs": log.repairs, "missing_events": missing, "egress": manifest}),
         human,
     ))
 }

@@ -19,11 +19,15 @@
 
 - **Link proposals.** Accepting a proposal again after a failure no longer appends a second link. `import` no longer moves an accepted or rejected proposal back to open; it stops with `E_STORE_CONFLICT` instead. Removing the link an accepted proposal created marks the proposal `withdrawn`, a new final status.
 
+- **Validation verdicts.** A verdict is read without regard to case, and any value other than `yes`, `partly` or `no` counts as not judged. Before, anything but `no` or `partly` counted as supported, which let claims through for providers that do not enforce the schema.
+- **`validate` and repaired claims.** A claim the repair step fixed is now valid; before, `validate` reported it as unsupported and returned `valid: false`.
+
 ### Changed
 
 - `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.
 - `land --json` adds `resumed` and `skipped_links`.
 - `link --json` adds `withdrawn` when removing a link withdraws its proposal. Accepting an already accepted proposal now succeeds without change instead of failing with `E_USAGE`.
+- `validate --json` adds `repairs[]`: claims that hold once reworded, as `{from, to}`.
 - `export` adds a `stories` list to `gitstory-export.json`: each current story as commands show it. `objects` is unchanged, and bundles without `stories` still import.
 
 ## 0.0.1 — 2026-11-04
