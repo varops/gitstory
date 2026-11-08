@@ -217,7 +217,7 @@ Removes the local collection of work units past their `expires_at` (see `status`
 ### `hooks install|uninstall|status claude-code|git [--scope project|local|user]`
 
 - **`claude-code`** adds a `Stop` hook to `.claude/settings.json` (or `settings.local.json`, or the user settings).
-- **`git`** adds a `post-commit` hook.
+- **`git`** adds a `post-commit` hook: a marker comment and the command line after it. `uninstall` removes both by the marker, even if the command line was edited, and keeps the rest of the hook.
 
 Both run `git story draft --background --json`, so neither waits for the model. Data: `{path, changed, installed, command}`.
 

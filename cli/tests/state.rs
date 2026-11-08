@@ -1039,3 +1039,25 @@ fn import_refuses_an_unknown_review_status() {
     assert_ne!(code, 0, "{v}");
     assert_eq!(v["error"]["code"], "E_USAGE", "{v}");
 }
+
+// ---------------------------------------------------------------------------
+// 12. Hook uninstall
+
+/// Uninstall finds the hook by its marker, even when the line was edited.
+#[test]
+fn git_hook_uninstall_removes_an_edited_hook() {
+    let r = Repo::new("hook-edit");
+    let h = r.ok(&["hooks", "install", "git"]);
+    let path = PathBuf::from(h["path"].as_str().unwrap());
+    let text = fs::read_to_string(&path).unwrap();
+    let edited = text.replace(">/dev/null 2>&1 || true", "|| echo 'draft failed'");
+    assert_ne!(edited, text);
+    // Something else the user keeps in the same hook.
+    fs::write(&path, format!("{edited}echo committed\n")).unwrap();
+    let u = r.ok(&["hooks", "uninstall", "git"]);
+    assert_eq!(u["changed"], true);
+    assert_eq!(u["installed"], false, "{u}");
+    let left = fs::read_to_string(&path).unwrap();
+    assert!(!left.contains("git story"), "{left}");
+    assert!(left.contains("echo committed"), "{left}");
+}
