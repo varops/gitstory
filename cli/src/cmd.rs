@@ -433,8 +433,9 @@ pub fn land(
         let proposals = plan_proposals(&ws, &idx, &story, &diff, &blame_base)?;
         finish_landing(&ws, &mut wu, &story, &round, &apply, &proposals)?;
         let manifest = ws.store.egress(&story.egress)?;
+        let shown = ws.index()?.view(story);
         return Ok(landed_out(
-            env, &story, proposals, manifest, None, true, &skipped,
+            env, &shown, proposals, manifest, None, true, &skipped,
         ));
     }
 
@@ -534,9 +535,10 @@ pub fn land(
     if let (Some(dir), Some(b)) = (&study_baseline, &baseline) {
         study_sheet = Some(crate::study::write_sheet(dir, &story, &commit.subject, b)?);
     }
+    let shown = ws.index()?.view(story);
     Ok(landed_out(
         env,
-        &story,
+        &shown,
         proposals,
         Some(manifest),
         study_sheet,
@@ -574,7 +576,7 @@ fn finish_landing(
             kind: LinkKind::Supersedes,
             from: story.story_id.clone(),
             to: old.clone(),
-            at: id::now_ms(),
+            at: crate::store::link_time(),
             author: author.clone(),
             proposal: None,
         })?;
@@ -1092,7 +1094,7 @@ pub fn link(
                 kind: p.kind,
                 from: p.from.clone(),
                 to: p.to.clone(),
-                at: id::now_ms(),
+                at: crate::store::link_time(),
                 author,
                 proposal: Some(p.id.clone()),
             })?;
@@ -1130,7 +1132,7 @@ pub fn link(
         kind,
         from: from.clone(),
         to: to.clone(),
-        at: id::now_ms(),
+        at: crate::store::link_time(),
         author,
         proposal: None,
     };
@@ -1291,13 +1293,14 @@ pub fn edit(env: &Env, a: EditArgs) -> Result<Out> {
     }
     s.version += 1;
     ws.store.put_story(&s)?;
+    let shown = idx.view(s);
     Ok(Out::new(
-        json!({"story": story_view(env, &s), "event": ev.id}),
+        json!({"story": story_view(env, &shown), "event": ev.id}),
         format!(
             "{} is now v{}\n\n{}",
-            s.story_id,
-            s.version,
-            render::markdown(&s)
+            shown.story_id,
+            shown.version,
+            render::markdown(&shown)
         ),
     ))
 }
@@ -1321,36 +1324,44 @@ pub fn export(env: &Env, format: &str, out: Option<PathBuf>) -> Result<Out> {
         };
         objects.insert(key, v);
     }
+    // `objects` is the store as is, for import. `stories` is each current
+    // story as commands show it, with status and links from the link log.
+    let idx = ws.index()?;
+    let mut stories = Vec::new();
+    for id in ws.store.story_ids()? {
+        if let Some(s) = idx.story(&id)? {
+            stories.push(s);
+        }
+    }
     let bundle = json!({
         "schema": EXPORT_SCHEMA,
         "repository": ws.store.repo,
         "exported_at": id::now_ms(),
         "objects": objects,
+        "stories": stories,
     });
     let json_path = dir.join("gitstory-export.json");
     fs::write(&json_path, serde_json::to_vec_pretty(&bundle)?)?;
     let mut written = vec![json_path.clone()];
     if format == "markdown" {
-        let idx = ws.index()?;
         let stories_dir = dir.join("stories");
         fs::create_dir_all(&stories_dir)?;
         let mut index = format!("# Stories for {}\n\n", ws.store.repo);
-        for id in ws.store.story_ids()? {
-            if let Some(s) = idx.story(&id)? {
-                let p = stories_dir.join(format!("{id}.md"));
-                fs::write(&p, render::markdown(&s))?;
-                index.push_str(&format!(
-                    "- [{}](stories/{id}.md) — `{}`{}\n",
-                    s.summary,
-                    &s.commit[..s.commit.len().min(10)],
-                    if s.status == StoryStatus::Superseded {
-                        " (superseded)"
-                    } else {
-                        ""
-                    }
-                ));
-                written.push(p);
-            }
+        for s in &stories {
+            let id = &s.story_id;
+            let p = stories_dir.join(format!("{id}.md"));
+            fs::write(&p, render::markdown(s))?;
+            index.push_str(&format!(
+                "- [{}](stories/{id}.md) — `{}`{}\n",
+                s.summary,
+                &s.commit[..s.commit.len().min(10)],
+                if s.status == StoryStatus::Superseded {
+                    " (superseded)"
+                } else {
+                    ""
+                }
+            ));
+            written.push(p);
         }
         let ip = dir.join("index.md");
         fs::write(&ip, index)?;

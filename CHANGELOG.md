@@ -14,10 +14,14 @@
 - **Landing is safe to retry.** `land` runs every check that can fail (story rules, blame and link proposals) before it writes anything. When a later step fails, running `land` again finishes the existing story instead of writing a second one for the same commit, which made `validate` and `edit` fail with `E_AMBIGUOUS`.
 - **Supersedes cycles.** A `note --supersedes` link that would create a cycle is now skipped at landing and reported. Before, the cycle check had no effect.
 
+- **Story status and links come from the link log only.** `link --remove` now undoes a `supersedes` link that came from `note --supersedes`. `edit --json` and `land --json` show the derived `status`, `supersedes` and `related`, not the stored copy (which always said `current`).
+- **Link log order.** Link entries written in the same millisecond by one process keep their order.
+
 ### Changed
 
 - `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.
 - `land --json` adds `resumed` and `skipped_links`.
+- `export` adds a `stories` list to `gitstory-export.json`: each current story as commands show it. `objects` is unchanged, and bundles without `stories` still import.
 
 ## 0.0.1 — 2026-11-04
 

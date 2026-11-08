@@ -79,7 +79,7 @@ A **story** (`gitstory/v1`) is the unit everything returns:
 ```
 
 - `contains` lists the commits a merge brought in. Blame on any of them finds the story.
-- `status` comes from accepted links only, never from a guess.
+- `status`, `supersedes` and `related` come from the link log only, never from a guess or from the stored copy of the story. Removing a link (`link --remove`) always takes effect, including a link that came from `note --supersedes`. Every command that returns a story, including `land`, `edit` and `export`, shows it this way.
 - Every claim outside `hypotheses` cites evidence and is `observed` or `stated`. Inferred claims appear only in `hypotheses`.
 
 An **evidence event** has a durable part that is stored with the story, and an optional external pointer that may stop resolving:
@@ -168,6 +168,8 @@ Data: `{story, valid, unsupported[], missing_events[], egress}`.
 
 Adds or removes a link in the append-only link log, or decides a proposal. A `supersedes` link that would create a cycle is refused. Data: `{link}` or `{proposal}`.
 
+The log replays in order of each entry's `at` (unix ms). Within one process `at` strictly increases, so an add and a remove made in the same millisecond keep their order. Entries written on different machines are ordered by those machines' clocks.
+
 ### `proposals`
 
 Open link proposals. Data: `{proposals[]}`.
@@ -180,7 +182,7 @@ Data: `{story, event}`.
 
 ### `export [--format json|markdown] [--out DIR]`
 
-Writes `gitstory-export.json` (schema `gitstory-export/v1`): every stored object, including story versions, cited events, egress manifests, the link log and proposals. `markdown` also writes `index.md` and one page per story. Data: `{directory, files, objects}`.
+Writes `gitstory-export.json` (schema `gitstory-export/v1`). Its `objects` hold every stored object as stored, including story versions, cited events, egress manifests, the link log and proposals; `import` reads only these. Its `stories` list each current story as commands show it, with `status`, `supersedes` and `related` from the link log. `markdown` also writes `index.md` and one page per story. Data: `{directory, files, objects}`.
 
 ### `import DIR|FILE`
 

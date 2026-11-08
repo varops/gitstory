@@ -467,3 +467,62 @@ fn land_skips_and_reports_a_supersedes_cycle() {
         "the cycle was written"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 3. Story status and links come from the link log only
+
+/// Land A, then B with `note --supersedes A`.
+fn a_then_b(r: &Repo) -> (String, String) {
+    let a = land_branch(r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    let b = land_branch(
+        r,
+        "feat/b",
+        "b.rs",
+        &["Replace a with b because b is simpler", "--supersedes", &a],
+    );
+    (a, b)
+}
+
+#[test]
+fn link_remove_undoes_a_note_supersedes() {
+    let r = Repo::new("unlink-note");
+    let (a, b) = a_then_b(&r);
+    assert_eq!(r.ok(&["show", &b])["stories"][0]["supersedes"], json!([a]));
+    assert_eq!(r.ok(&["show", &a])["stories"][0]["status"], "superseded");
+    r.ok(&["link", &b, "--supersedes", &a, "--remove"]);
+    let sb = r.ok(&["show", &b])["stories"][0].clone();
+    assert_eq!(sb["supersedes"], json!([]), "{sb}");
+    assert_eq!(r.ok(&["show", &a])["stories"][0]["status"], "current");
+    let h = r.ok(&["history", &b]);
+    assert_eq!(h["chain"].as_array().unwrap().len(), 1, "{h}");
+}
+
+#[test]
+fn edit_and_export_show_the_derived_status() {
+    let r = Repo::new("derived-view");
+    let (a, b) = a_then_b(&r);
+    let e = r.ok(&["edit", &a, "--review", "reviewed"]);
+    assert_eq!(e["story"]["status"], "superseded", "{e}");
+    let out = r.base.join("export");
+    r.ok(&["export", "--out", out.to_str().unwrap()]);
+    let bundle: Value =
+        serde_json::from_slice(&fs::read(out.join("gitstory-export.json")).unwrap()).unwrap();
+    let view = |id: &str| {
+        bundle["stories"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no stories view in the export: {}", bundle["schema"]))
+            .iter()
+            .find(|s| s["story_id"] == id)
+            .cloned()
+            .unwrap()
+    };
+    assert_eq!(view(&a)["status"], "superseded");
+    assert_eq!(view(&b)["supersedes"], json!([a]));
+    // The store dump itself is unchanged, so the bundle still imports.
+    let other = Repo::new("derived-view-b");
+    other.ok(&["import", out.to_str().unwrap()]);
+    assert_eq!(
+        other.ok(&["show", &a])["stories"][0]["status"],
+        "superseded"
+    );
+}

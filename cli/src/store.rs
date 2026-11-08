@@ -93,6 +93,22 @@ impl Backend for LocalBackend {
     }
 }
 
+/// The `at` of a new link log entry (unix ms). Strictly increasing within
+/// one process, so an Add and a Remove written in the same millisecond
+/// replay in the order they were made. Entries from different machines
+/// order by their clocks.
+pub fn link_time() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    let now = gitstory_proto::id::now_ms();
+    let prev = LAST
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |last| {
+            Some(now.max(last + 1))
+        })
+        .expect("always Some");
+    now.max(prev + 1)
+}
+
 /// A repository's slice of the store.
 pub struct Store {
     pub backend: Box<dyn Backend>,
@@ -291,6 +307,40 @@ mod tests {
         assert_eq!(store.story_ids().unwrap(), vec!["st_1"]);
         assert_eq!(store.stories_for_commit("abc").unwrap(), vec!["st_1"]);
         assert_eq!(store.commits().unwrap(), vec!["abc"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An Add and a Remove written in the same millisecond replay in order.
+    #[test]
+    fn link_log_keeps_order_within_one_process() {
+        use gitstory_proto::record::{LinkKind, LinkOp};
+        let dir =
+            std::env::temp_dir().join(format!("gs-links-{}", gitstory_proto::id::random_hex(4)));
+        let store = Store {
+            backend: Box::new(LocalBackend { root: dir.clone() }),
+            repo: "a/b".into(),
+        };
+        for op in [LinkOp::Add, LinkOp::Remove].repeat(50) {
+            store
+                .append_link(&LinkEntry {
+                    op,
+                    kind: LinkKind::Supersedes,
+                    from: "st_b".into(),
+                    to: "st_a".into(),
+                    at: link_time(),
+                    author: "t".into(),
+                    proposal: None,
+                })
+                .unwrap();
+        }
+        let ats: Vec<i64> = store.links().unwrap().iter().map(|l| l.at).collect();
+        assert!(ats.windows(2).all(|w| w[0] < w[1]), "{ats:?}");
+        assert!(
+            crate::index::link_graph(&store)
+                .unwrap()
+                .supersedes
+                .is_empty()
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }
