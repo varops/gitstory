@@ -180,9 +180,7 @@ fn story_for(case: &Case, events: &[EvidenceEvent]) -> Result<Story> {
         unknowns: Vec::new(),
         paths: Vec::new(),
         links: Default::default(),
-        review: Review {
-            status: "unreviewed".into(),
-        },
+        review: Review::default(),
         egress: String::new(),
     };
     for c in &case.claims {
@@ -525,7 +523,7 @@ pub fn baseline(
     ignored: &dyn Fn(&str) -> bool,
 ) -> Result<String> {
     let (bundle, mut sent) = synth::gated_bundle(cfg, input.events, input.diff, ignored);
-    sent.purpose = "study_baseline";
+    sent.purpose = gitstory_proto::record::Purpose::StudyBaseline;
     let user = json!({
         "commit": {"sha": input.commit, "subject": scrub::scrub(input.commit_subject).0},
         "events": bundle["events"],
@@ -669,9 +667,7 @@ mod tests {
             unknowns: vec!["Why 5s".into()],
             paths: vec![],
             links: Default::default(),
-            review: Review {
-                status: "unreviewed".into(),
-            },
+            review: Review::default(),
             egress: String::new(),
         };
         let b = blind(&s);

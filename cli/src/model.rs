@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use gitstory_proto::id;
-use gitstory_proto::record::{EgressCall, HunkRef};
+use gitstory_proto::record::{EgressCall, HunkRef, Purpose};
 use serde_json::{Value, json};
 
 use crate::config::{self, EgressConfig, ModelConfig};
@@ -25,7 +25,7 @@ pub struct Request {
 
 /// What a request carried, for the egress manifest.
 pub struct Sent {
-    pub purpose: &'static str,
+    pub purpose: Purpose,
     pub event_ids: Vec<String>,
     pub hunks: Vec<HunkRef>,
     pub excerpts: bool,
@@ -107,7 +107,7 @@ impl<'a> Gate<'a> {
         }
         // Recorded before sending: a failed request may still have left.
         self.calls.push(EgressCall {
-            purpose: sent.purpose.to_owned(),
+            purpose: sent.purpose.as_str().to_owned(),
             provider: m.provider.clone(),
             endpoint: url.clone(),
             model: m.name.clone(),

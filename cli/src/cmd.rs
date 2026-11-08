@@ -9,11 +9,13 @@ use gitstory_proto::id;
 use gitstory_proto::record::{
     EgressManifest, LinkEntry, LinkKind, LinkOp, LinkProposal, ProposalStatus,
 };
-use gitstory_proto::story::{Claim, ClaimStatus, ClaimType, Stage, Story, StoryStatus};
+use gitstory_proto::story::{
+    Claim, ClaimStatus, ClaimType, ReviewStatus, Stage, Story, StoryStatus,
+};
 use serde_json::{Value, json};
 
 use crate::adapters::{self, Ctx};
-use crate::collect::{self, WorkUnit};
+use crate::collect::{self, Scope, WorkUnit};
 use crate::config::{self, RepoConfig};
 use crate::error::{Context, Result};
 use crate::git::Repo;
@@ -88,8 +90,10 @@ pub fn init(env: &Env, repository: Option<String>, trust: bool, force: bool) -> 
     };
     let store = workspace::open_store(&repo, &cfg)?;
     let (endpoint, local) = model::endpoint(&cfg.model);
-    if trust && !local {
-        config::trust(&endpoint)?;
+    if trust {
+        for e in external_endpoints(&cfg) {
+            config::trust(&e)?;
+        }
     }
     let trusted = local || config::trusted(&endpoint)?;
     let mut human = if created {
@@ -126,22 +130,28 @@ pub fn init(env: &Env, repository: Option<String>, trust: bool, force: bool) -> 
     ))
 }
 
+/// Every configured endpoint that is not on this machine: the model, and
+/// the validation model when it has one.
+fn external_endpoints(cfg: &RepoConfig) -> Vec<String> {
+    let mut v = vec![model::endpoint(&cfg.model)];
+    if let Some(m) = &cfg.validation
+        && m.provider != "none"
+    {
+        v.push(model::endpoint(m));
+    }
+    let mut out: Vec<String> = v
+        .into_iter()
+        .filter(|(_, local)| !local)
+        .map(|(e, _)| config::normalize_endpoint(&e))
+        .collect();
+    out.dedup();
+    out
+}
+
 pub fn trust(env: &Env, endpoint: Option<String>) -> Result<Out> {
     let targets = match endpoint {
-        Some(e) => vec![e],
-        None => {
-            let ws = env.ws()?;
-            let mut v = vec![model::endpoint(&ws.cfg.model)];
-            if let Some(m) = &ws.cfg.validation
-                && m.provider != "none"
-            {
-                v.push(model::endpoint(m));
-            }
-            v.into_iter()
-                .filter(|(_, local)| !local)
-                .map(|(e, _)| e)
-                .collect()
-        }
+        Some(e) => vec![config::normalize_endpoint(&e)],
+        None => external_endpoints(&env.ws()?.cfg),
     };
     for t in &targets {
         config::trust(t)?;
@@ -221,34 +231,61 @@ pub fn note(
             "give the note text, or --test <cmd> --result pass|fail"
         ),
     };
-    if let Some(sid) = &supersedes {
-        let idx = ws.index()?;
-        let full = resolve_story(&idx, sid)?;
-        if !wu.meta.supersedes.contains(&full) {
-            wu.meta.supersedes.push(full);
-            wu.save_meta()?;
-        }
-    }
+    let full = match &supersedes {
+        Some(sid) => Some(resolve_story(&ws.index()?, sid)?),
+        None => None,
+    };
     wu.add_events(std::slice::from_ref(&ev))?;
+    wu.update(|m| {
+        if let Some(full) = full
+            && !m.supersedes.contains(&full)
+        {
+            m.supersedes.push(full);
+        }
+        m.touch(id::now_ms());
+        Ok(())
+    })?;
     Ok(Out::new(
         json!({"work_unit": wu_id, "event": ev, "supersedes": wu.meta.supersedes}),
         format!("noted {} in work unit {wu_id}", ev.id),
     ))
 }
 
-/// Run every enabled adapter for the work unit. Returns new event count.
-fn gather(ws: &Workspace, wu: &mut WorkUnit) -> Result<usize> {
+/// Run every enabled adapter for the work unit over `scope`. Returns the
+/// new event count.
+fn gather(ws: &Workspace, wu: &mut WorkUnit, scope: &Scope) -> Result<usize> {
     let wid = wu.meta.work_unit.clone();
     let ctx = Ctx::new(ws, &wid);
-    let mut events: Vec<EvidenceEvent> = adapters::git(&ctx, wu)?;
+    let mut events: Vec<EvidenceEvent> = adapters::git(&ctx, wu, scope)?;
     if ws.cfg.collection.claude_code {
-        events.extend(adapters::claude_code(&ctx, wu)?);
+        events.extend(adapters::claude_code(&ctx, wu, scope)?);
     }
+    let mut held = Vec::new();
     if ws.cfg.collection.ghf {
-        events.extend(crate::ghf::traces(&ctx, wu)?);
+        let (ev, h) = crate::ghf::traces(&ctx, wu, scope)?;
+        events.extend(ev);
+        held = h;
     }
     let n = wu.add_events(&events)?;
-    wu.save_meta()?;
+    // Offsets only grow, so the furthest read wins.
+    let offsets = wu.meta.offsets.clone();
+    wu.update(|m| {
+        for (file, n) in offsets {
+            let o = m.offsets.entry(file).or_insert(0);
+            *o = (*o).max(n);
+        }
+        let now = id::now_ms();
+        for h in held {
+            match m.ghf_holds.iter_mut().find(|x| x.id == h) {
+                Some(x) => x.at = now,
+                None => m.ghf_holds.push(collect::GhfHold { id: h, at: now }),
+            }
+        }
+        if n > 0 {
+            m.touch(id::now_ms());
+        }
+        Ok(())
+    })?;
     Ok(n)
 }
 
@@ -268,7 +305,8 @@ pub fn draft(env: &Env, work_unit: Option<String>, background: bool) -> Result<O
         ));
     }
     let mut wu = WorkUnit::open(&ws, &wu_id)?;
-    let new = gather(&ws, &mut wu)?;
+    let scope = Scope::of(&wu.meta);
+    let new = gather(&ws, &mut wu, &scope)?;
     let head = ws
         .repo
         .head()
@@ -305,9 +343,11 @@ pub fn draft(env: &Env, work_unit: Option<String>, background: bool) -> Result<O
         calls: gate.calls,
     };
     wu.put_egress(&manifest)?;
+    wu.touch()?;
     let mut story = result?;
     story.egress = egress_id;
     wu.put_draft(&story)?;
+    wu.touch()?;
     Ok(Out::new(
         json!({"story": story_view(env, &story), "work_unit": wu_id, "new_events": new, "events": events.len(), "egress": manifest}),
         render::markdown(&story),
@@ -374,27 +414,86 @@ pub fn land(
     }
     let mut wu = WorkUnit::open(&ws, &wu_id)?;
     let commit = ws.repo.commit(&sha)?;
-    // A run of commits pushed straight to main lands as one story.
-    let since = match &since {
+    // A run of commits pushed straight to main lands as one story. The
+    // range and its session window hold for this run only.
+    let (since, scope) = match &since {
         Some(r) => {
             let base = ws.require_commit(r)?;
             if base == sha || !ws.repo.is_ancestor(&base, &sha) {
                 fail!(Usage, "--since {r} must be an ancestor of {to}");
             }
             let start = ws.repo.commit(&base)?.time * 1000;
-            wu.meta.base_rev = Some(base.clone());
-            wu.meta.tip = Some(sha.clone());
-            wu.meta.window = Some((start, commit.time * 1000 + 10 * 60_000));
-            Some(base)
+            let scope = Scope {
+                base: Some(base.clone()),
+                tip: Some(sha.clone()),
+                window: Some((start, commit.time * 1000 + 10 * 60_000)),
+            };
+            (Some(base), scope)
         }
-        None => None,
+        None => (None, Scope::of(&wu.meta)),
     };
-    gather(&ws, &mut wu)?;
+    gather(&ws, &mut wu, &scope)?;
     let drafts = wu.drafts()?;
     let diff = match &since {
         Some(base) => ws.repo.range_diff(base, &sha)?,
         None => ws.repo.commit_diff(&sha)?,
     };
+    let blame_base = match &since {
+        Some(base) => vec![base.clone()],
+        None => commit.parents.clone(),
+    };
+    let idx = ws.index()?;
+
+    // This work unit already wrote a story for this commit: a retry after a
+    // later step failed, or the same landing run twice. Finish the steps
+    // after the story instead of writing a second one.
+    if let Some(found) = idx
+        .for_commits(std::slice::from_ref(&sha))?
+        .into_iter()
+        .find(|s| s.commit == sha && s.work_unit == wu_id && s.stage == Stage::Landed)
+    {
+        let story = ws
+            .store
+            .story(&found.story_id)?
+            .ok_or_else(|| err!(NotFound, "no story {}", found.story_id))?;
+        // A landing that finished changes nothing more: links removed since
+        // stay removed, and newer drafts and notes wait for the next round.
+        // One that was cut short closes its own round: the drafts made
+        // before its story, and the notes the story applied.
+        let done = wu.meta.has_landed(&sha);
+        let (reconciled, consumed): (Vec<Story>, Vec<String>) = if done {
+            (Vec::new(), Vec::new())
+        } else {
+            (
+                drafts
+                    .iter()
+                    .filter(|d| d.created_at <= story.created_at)
+                    .cloned()
+                    .collect(),
+                story.supersedes.clone(),
+            )
+        };
+        let round = Round {
+            sha: &sha,
+            since: since.is_some() && !done,
+            drafts: &reconciled,
+            consumed_supersedes: &consumed,
+        };
+        let (apply, skipped, proposals) = if done {
+            (Vec::new(), Vec::new(), Vec::new())
+        } else {
+            let (apply, skipped) = plan_links(&ws, &story)?;
+            let proposals = plan_proposals(&ws, &idx, &story, &diff, &blame_base)?;
+            (apply, skipped, proposals)
+        };
+        finish_landing(&ws, &mut wu, &story, &round, &apply, &proposals)?;
+        let manifest = ws.store.egress(&story.egress)?;
+        let shown = ws.index()?.view(story);
+        return Ok(landed_out(
+            env, &shown, proposals, manifest, None, true, &skipped,
+        ));
+    }
+
     let landed_paths: BTreeSet<String> = diff
         .iter()
         .flat_map(|f| std::iter::once(f.path.clone()).chain(f.old_path.clone()))
@@ -402,6 +501,14 @@ pub fn land(
     let events = focus(wu.events()?, &landed_paths);
     let mut gate = Gate::new(&ws.cfg.egress);
     let ignored = ignored_fn(&ws, &wu_id);
+    // What this landing consumes; notes added meanwhile wait for the next.
+    let consumed_supersedes = wu.meta.supersedes.clone();
+    let round = Round {
+        sha: &sha,
+        since: since.is_some(),
+        drafts: &drafts,
+        consumed_supersedes: &consumed_supersedes,
+    };
     let input = synth::Input {
         work_unit: &wu_id,
         repo: &ws.store.repo,
@@ -411,7 +518,7 @@ pub fn land(
         diff: &diff,
         drafts: &drafts,
         stage: Stage::Landed,
-        supersedes: wu.meta.supersedes.clone(),
+        supersedes: consumed_supersedes.clone(),
     };
     let egress_id = id::new_id(id::EGRESS);
     let result = synth::synthesize(&ws.cfg, &mut gate, &input, &ignored)
@@ -436,71 +543,159 @@ pub fn land(
         id: egress_id.clone(),
         calls: gate.calls,
     };
-    let mut story = match result {
-        Ok(s) => s,
+    // Every check that can fail runs before anything is written.
+    let checked = result.and_then(|mut story| {
+        story.egress = egress_id.clone();
+        story.contains = match &since {
+            Some(base) => ws
+                .repo
+                .commits_between(base, &sha)?
+                .into_iter()
+                .filter(|c| *c != sha)
+                .collect(),
+            None => ws.repo.merged_commits(&sha)?,
+        };
+        let (apply, skipped) = plan_links(&ws, &story)?;
+        story.supersedes.retain(|s| !skipped.contains(s));
+        let violations = story.violations();
+        if !violations.is_empty() {
+            fail!(
+                SynthesisInvalid,
+                "refusing to store an invalid story: {}",
+                violations.join("; ")
+            );
+        }
+        let proposals = plan_proposals(&ws, &idx, &story, &diff, &blame_base)?;
+        Ok((story, apply, skipped, proposals))
+    });
+    // Only the evidence the story cites goes to the shared store; the
+    // story is written last, so a story in the store means its evidence
+    // and manifest are there too.
+    let written = checked.and_then(|(story, apply, skipped, proposals)| {
+        let cited: HashSet<&str> = story
+            .claims()
+            .into_iter()
+            .flat_map(|(_, c)| c.evidence.iter().map(String::as_str))
+            .collect();
+        for e in events.iter().filter(|e| cited.contains(e.id.as_str())) {
+            ws.store.put_event(e)?;
+        }
+        ws.store.put_egress(&manifest)?;
+        ws.store.put_story(&story)?;
+        Ok((story, apply, skipped, proposals))
+    });
+    let (story, apply, skipped, proposals) = match written {
+        Ok(v) => v,
         Err(f) => {
+            // Data may have left: keep the manifest with the work unit.
             wu.put_egress(&manifest)?;
+            wu.touch()?;
             return Err(f);
         }
     };
-    story.egress = egress_id;
-    story.contains = match &since {
-        Some(base) => ws
-            .repo
-            .commits_between(base, &sha)?
-            .into_iter()
-            .filter(|c| *c != sha)
-            .collect(),
-        None => ws.repo.merged_commits(&sha)?,
-    };
-    // Only the evidence the story cites goes to the shared store.
-    let cited: HashSet<&str> = story
-        .claims()
-        .into_iter()
-        .flat_map(|(_, c)| c.evidence.iter().map(String::as_str))
-        .collect();
-    for e in events.iter().filter(|e| cited.contains(e.id.as_str())) {
-        ws.store.put_event(e)?;
+    finish_landing(&ws, &mut wu, &story, &round, &apply, &proposals)?;
+    let mut study_sheet = None;
+    if let (Some(dir), Some(b)) = (&study_baseline, &baseline) {
+        study_sheet = Some(crate::study::write_sheet(dir, &story, &commit.subject, b)?);
     }
-    ws.store.put_egress(&manifest)?;
-    // Explicit supersedes from notes become links, after a cycle check.
+    let shown = ws.index()?.view(story);
+    Ok(landed_out(
+        env,
+        &shown,
+        proposals,
+        Some(manifest),
+        study_sheet,
+        false,
+        &skipped,
+    ))
+}
+
+/// What a landing closes in its work unit.
+struct Round<'a> {
+    sha: &'a str,
+    /// Landed with `--since`: the next round starts at `sha`.
+    since: bool,
+    /// The drafts it reconciled.
+    drafts: &'a [Story],
+    /// The `note --supersedes` stories it applied.
+    consumed_supersedes: &'a [String],
+}
+
+/// The steps after the story is in the store, each safe to repeat: the
+/// story's `supersedes` links, link proposals, ghf holds and the work unit's
+/// landing record.
+fn finish_landing(
+    ws: &Workspace,
+    wu: &mut WorkUnit,
+    story: &Story,
+    round: &Round,
+    apply: &[String],
+    proposals: &[LinkProposal],
+) -> Result<()> {
     let author = ws.author();
-    let mut graph = index::link_graph(&ws.store)?;
-    for old in &story.supersedes {
-        if creates_cycle(&graph, &story.story_id, old) {
-            continue;
-        }
-        graph
-            .supersedes
-            .insert((story.story_id.clone(), old.clone()), ());
-    }
-    ws.store.put_story(&story)?;
-    for old in &story.supersedes {
+    for old in apply {
         ws.store.append_link(&LinkEntry {
             op: LinkOp::Add,
             kind: LinkKind::Supersedes,
             from: story.story_id.clone(),
             to: old.clone(),
-            at: id::now_ms(),
+            at: crate::store::link_time(),
             author: author.clone(),
             proposal: None,
         })?;
     }
-    let blame_base = match &since {
-        Some(base) => vec![base.clone()],
-        None => commit.parents.clone(),
-    };
-    let proposals = propose_links(&ws, &story, &diff, &blame_base)?;
-    crate::ghf::release(&Ctx::new(&ws, &wu_id), &mut wu);
-    wu.meta.landed.push((sha.clone(), story.story_id.clone()));
-    wu.meta.landed_at = Some(id::now_ms());
-    wu.save_meta()?;
-    let mut human = render::markdown(&story);
-    let mut study_sheet = None;
-    if let (Some(dir), Some(b)) = (&study_baseline, &baseline) {
-        let path = crate::study::write_sheet(dir, &story, &commit.subject, b)?;
+    for p in proposals {
+        ws.store.put_proposal(p)?;
+    }
+    // Drafts and failed landings sent data too: their manifests go to the
+    // store with the landed one.
+    wu.upload_egress(&ws.store)?;
+    let released = crate::ghf::release(&Ctx::new(ws, &story.work_unit), wu);
+    wu.consume_drafts(round.sha, round.drafts)?;
+    // Close the round on the meta as it is now, not as it was when landing
+    // started: notes and holds added meanwhile stay.
+    wu.update(|m| {
+        m.record_landing(round.sha, &story.story_id, id::now_ms())?;
+        m.supersedes
+            .retain(|s| !round.consumed_supersedes.contains(s));
+        m.ghf_holds.retain(|h| !released.contains(&h.id));
+        if round.since {
+            m.base_rev = Some(round.sha.to_owned());
+        }
+        Ok(())
+    })
+}
+
+fn landed_out(
+    env: &Env,
+    story: &Story,
+    proposals: Vec<LinkProposal>,
+    manifest: Option<EgressManifest>,
+    study_sheet: Option<PathBuf>,
+    resumed: bool,
+    skipped: &[String],
+) -> Out {
+    let cited: HashSet<&str> = story
+        .claims()
+        .into_iter()
+        .flat_map(|(_, c)| c.evidence.iter().map(String::as_str))
+        .collect();
+    let mut human = String::new();
+    if resumed {
+        human.push_str(&format!(
+            "{} was already in the store; finished landing it\n\n",
+            story.story_id
+        ));
+    }
+    human.push_str(&render::markdown(story));
+    if let Some(path) = &study_sheet {
         human.push_str(&format!("\nstudy: rating sheet {}\n", path.display()));
-        study_sheet = Some(path);
+    }
+    for old in skipped {
+        human.push_str(&format!(
+            "\nskipped: {} supersedes {old} would create a cycle",
+            story.story_id
+        ));
     }
     for p in &proposals {
         human.push_str(&format!(
@@ -508,16 +703,38 @@ pub fn land(
             p.from, p.kind, p.to, p.reason, p.id
         ));
     }
-    Ok(Out::new(
-        json!({"story": story_view(env, &story), "proposals": proposals, "cited_events": cited.len(), "egress": manifest, "study_sheet": study_sheet}),
+    Out::new(
+        json!({"story": story_view(env, story), "proposals": proposals, "cited_events": cited.len(), "egress": manifest, "study_sheet": study_sheet, "resumed": resumed, "skipped_links": skipped}),
         human,
-    ))
+    )
+}
+
+/// Split a story's `supersedes` into links to add and links skipped because
+/// they would close a cycle. Links already in force are neither.
+fn plan_links(ws: &Workspace, story: &Story) -> Result<(Vec<String>, Vec<String>)> {
+    let mut graph = index::link_graph(&ws.store)?;
+    let (mut apply, mut skipped) = (Vec::new(), Vec::new());
+    for old in &story.supersedes {
+        let key = (story.story_id.clone(), old.clone());
+        if graph.supersedes.contains_key(&key) {
+            continue;
+        }
+        if creates_cycle(&graph, &story.story_id, old) {
+            skipped.push(old.clone());
+            continue;
+        }
+        graph.supersedes.insert(key, None);
+        apply.push(old.clone());
+    }
+    Ok((apply, skipped))
 }
 
 /// Blame the lines the landed commit changed (in its parent) and propose
-/// `supersedes` links to the stories behind them. Never applied on its own.
-fn propose_links(
+/// `supersedes` links to the stories behind them. Never applied on its own,
+/// and nothing is written here.
+fn plan_proposals(
     ws: &Workspace,
+    idx: &Index,
     story: &Story,
     diff: &[crate::git::FileDiff],
     parents: &[String],
@@ -525,7 +742,6 @@ fn propose_links(
     let Some(parent) = parents.first() else {
         return Ok(Vec::new());
     };
-    let idx = ws.index()?;
     let existing: HashSet<(String, String)> = ws
         .store
         .proposals()?
@@ -559,7 +775,7 @@ fn propose_links(
         {
             continue;
         }
-        let p = LinkProposal {
+        out.push(LinkProposal {
             id: id::new_id(id::PROPOSAL),
             kind: LinkKind::Supersedes,
             from: story.story_id.clone(),
@@ -567,9 +783,7 @@ fn propose_links(
             reason,
             status: ProposalStatus::Open,
             at: id::now_ms(),
-        };
-        ws.store.put_proposal(&p)?;
-        out.push(p);
+        });
     }
     Ok(out)
 }
@@ -867,7 +1081,8 @@ pub fn validate(env: &Env, rev: String) -> Result<Out> {
     .unwrap_or_default();
     let ignored = ignored_fn(&ws, &s.work_unit);
     let mut gate = Gate::new(&ws.cfg.egress);
-    let checked = synth::validate(&ws.cfg, &mut gate, s.clone(), &events, &diff, &ignored)?;
+    let (checked, log) =
+        synth::validate_logged(&ws.cfg, &mut gate, s.clone(), &events, &diff, &ignored)?;
     let manifest = EgressManifest {
         id: id::new_id(id::EGRESS),
         calls: gate.calls,
@@ -875,6 +1090,7 @@ pub fn validate(env: &Env, rev: String) -> Result<Out> {
     if !manifest.calls.is_empty() {
         ws.store.put_egress(&manifest)?;
     }
+    // A claim the repair step rewrote into one its evidence supports holds.
     let kept: HashSet<&str> = checked
         .decisions
         .iter()
@@ -882,6 +1098,7 @@ pub fn validate(env: &Env, rev: String) -> Result<Out> {
         .chain(&checked.discarded)
         .chain(&checked.evidence_summary)
         .map(|c| c.claim.as_str())
+        .chain(log.repairs.iter().map(|r| r.from.as_str()))
         .collect();
     let failed: Vec<&str> = s
         .decisions
@@ -907,8 +1124,11 @@ pub fn validate(env: &Env, rev: String) -> Result<Out> {
     for m in &missing {
         human.push_str(&format!("\n  missing evidence: {m}"));
     }
+    for r in &log.repairs {
+        human.push_str(&format!("\n  holds as reworded: {} -> {}", r.from, r.to));
+    }
     Ok(Out::new(
-        json!({"story": id, "valid": ok, "unsupported": failed, "missing_events": missing, "egress": manifest}),
+        json!({"story": id, "valid": ok, "unsupported": failed, "repairs": log.repairs, "missing_events": missing, "egress": manifest}),
         human,
     ))
 }
@@ -932,34 +1152,47 @@ pub fn link(
             .store
             .proposal(pid)?
             .ok_or_else(|| err!(NotFound, "no proposal {pid}"))?;
-        if p.status != ProposalStatus::Open {
-            fail!(Usage, "proposal {pid} is already {:?}", p.status);
-        }
-        if accept.is_some() {
-            let g = index::link_graph(&ws.store)?;
-            if p.kind == LinkKind::Supersedes && creates_cycle(&g, &p.from, &p.to) {
-                fail!(
-                    LinkCycle,
-                    "accepting {pid} would create a supersession cycle"
-                );
-            }
-            ws.store.append_link(&LinkEntry {
-                op: LinkOp::Add,
-                kind: p.kind,
-                from: p.from.clone(),
-                to: p.to.clone(),
-                at: id::now_ms(),
-                author,
-                proposal: Some(p.id.clone()),
-            })?;
-            p.status = ProposalStatus::Accepted;
+        let next = if accept.is_some() {
+            ProposalStatus::Accepted
         } else {
-            p.status = ProposalStatus::Rejected;
+            ProposalStatus::Rejected
+        };
+        p.status = p
+            .status
+            .transition(next)
+            .map_err(|e| err!(Usage, "{pid}: {e}"))?;
+        if next == ProposalStatus::Accepted {
+            let g = index::link_graph(&ws.store)?;
+            let map = match p.kind {
+                LinkKind::Supersedes => &g.supersedes,
+                LinkKind::Related => &g.related,
+            };
+            // The link is written first and the proposal second, so a retry
+            // after a failure in between finds the link and does not add it
+            // again.
+            let in_force = map.get(&(p.from.clone(), p.to.clone())) == Some(&Some(p.id.clone()));
+            if !in_force {
+                if p.kind == LinkKind::Supersedes && creates_cycle(&g, &p.from, &p.to) {
+                    fail!(
+                        LinkCycle,
+                        "accepting {pid} would create a supersession cycle"
+                    );
+                }
+                ws.store.append_link(&LinkEntry {
+                    op: LinkOp::Add,
+                    kind: p.kind,
+                    from: p.from.clone(),
+                    to: p.to.clone(),
+                    at: crate::store::link_time(),
+                    author,
+                    proposal: Some(p.id.clone()),
+                })?;
+            }
         }
         ws.store.put_proposal(&p)?;
         return Ok(Out::new(
             json!({"proposal": p}),
-            format!("proposal {} {:?}", p.id, p.status).to_lowercase(),
+            format!("proposal {} {}", p.id, p.status.as_str()),
         ));
     }
     let idx = ws.index()?;
@@ -981,18 +1214,37 @@ pub fn link(
     {
         fail!(LinkCycle, "{from} supersedes {to} would create a cycle");
     }
+    // Removing a link an accepted proposal made withdraws the proposal. The
+    // proposal is written first: if the removal then fails, running it again
+    // still finds the link in force and its proposal.
+    let mut withdrawn = None;
+    if remove {
+        let g = index::link_graph(&ws.store)?;
+        let map = match kind {
+            LinkKind::Supersedes => &g.supersedes,
+            LinkKind::Related => &g.related,
+        };
+        if let Some(Some(pid)) = map.get(&(from.clone(), to.clone()))
+            && let Some(mut p) = ws.store.proposal(pid)?
+            && p.status.can_become(ProposalStatus::Withdrawn)
+        {
+            p.status = ProposalStatus::Withdrawn;
+            ws.store.put_proposal(&p)?;
+            withdrawn = Some(p);
+        }
+    }
     let entry = LinkEntry {
         op: if remove { LinkOp::Remove } else { LinkOp::Add },
         kind,
         from: from.clone(),
         to: to.clone(),
-        at: id::now_ms(),
+        at: crate::store::link_time(),
         author,
         proposal: None,
     };
     ws.store.append_link(&entry)?;
     Ok(Out::new(
-        json!({"link": entry}),
+        json!({"link": entry, "withdrawn": withdrawn}),
         format!(
             "{} {from} {:?} {to}",
             if remove { "removed" } else { "linked" },
@@ -1097,12 +1349,17 @@ pub fn edit(env: &Env, a: EditArgs) -> Result<Out> {
             ..c
         });
     }
-    if let Some(r) = &a.review {
-        if !matches!(r.as_str(), "reviewed" | "flagged" | "unreviewed") {
-            fail!(Usage, "--review must be reviewed, flagged or unreviewed");
-        }
-        s.review.status = r.clone();
-        description.push(format!("review: {r}"));
+    let review = match &a.review {
+        Some(r) => Some(
+            ReviewStatus::parse(r)
+                .ok_or_else(|| err!(Usage, "--review must be reviewed, flagged or unreviewed"))?,
+        ),
+        None => None,
+    };
+    let content_changed = !description.is_empty() || !promoted.is_empty() || !new_claims.is_empty();
+    s.review.status = s.review.status.after_edit(review, content_changed);
+    if let Some(r) = review {
+        description.push(format!("review: {}", r.as_str()));
     }
     for p in &promoted {
         description.push(format!("promoted: {}", p.claim));
@@ -1147,13 +1404,14 @@ pub fn edit(env: &Env, a: EditArgs) -> Result<Out> {
     }
     s.version += 1;
     ws.store.put_story(&s)?;
+    let shown = idx.view(s);
     Ok(Out::new(
-        json!({"story": story_view(env, &s), "event": ev.id}),
+        json!({"story": story_view(env, &shown), "event": ev.id}),
         format!(
             "{} is now v{}\n\n{}",
-            s.story_id,
-            s.version,
-            render::markdown(&s)
+            shown.story_id,
+            shown.version,
+            render::markdown(&shown)
         ),
     ))
 }
@@ -1177,36 +1435,44 @@ pub fn export(env: &Env, format: &str, out: Option<PathBuf>) -> Result<Out> {
         };
         objects.insert(key, v);
     }
+    // `objects` is the store as is, for import. `stories` is each current
+    // story as commands show it, with status and links from the link log.
+    let idx = ws.index()?;
+    let mut stories = Vec::new();
+    for id in ws.store.story_ids()? {
+        if let Some(s) = idx.story(&id)? {
+            stories.push(s);
+        }
+    }
     let bundle = json!({
         "schema": EXPORT_SCHEMA,
         "repository": ws.store.repo,
         "exported_at": id::now_ms(),
         "objects": objects,
+        "stories": stories,
     });
     let json_path = dir.join("gitstory-export.json");
     fs::write(&json_path, serde_json::to_vec_pretty(&bundle)?)?;
     let mut written = vec![json_path.clone()];
     if format == "markdown" {
-        let idx = ws.index()?;
         let stories_dir = dir.join("stories");
         fs::create_dir_all(&stories_dir)?;
         let mut index = format!("# Stories for {}\n\n", ws.store.repo);
-        for id in ws.store.story_ids()? {
-            if let Some(s) = idx.story(&id)? {
-                let p = stories_dir.join(format!("{id}.md"));
-                fs::write(&p, render::markdown(&s))?;
-                index.push_str(&format!(
-                    "- [{}](stories/{id}.md) — `{}`{}\n",
-                    s.summary,
-                    &s.commit[..s.commit.len().min(10)],
-                    if s.status == StoryStatus::Superseded {
-                        " (superseded)"
-                    } else {
-                        ""
-                    }
-                ));
-                written.push(p);
-            }
+        for s in &stories {
+            let id = &s.story_id;
+            let p = stories_dir.join(format!("{id}.md"));
+            fs::write(&p, render::markdown(s))?;
+            index.push_str(&format!(
+                "- [{}](stories/{id}.md) — `{}`{}\n",
+                s.summary,
+                &s.commit[..s.commit.len().min(10)],
+                if s.status == StoryStatus::Superseded {
+                    " (superseded)"
+                } else {
+                    ""
+                }
+            ));
+            written.push(p);
         }
         let ip = dir.join("index.md");
         fs::write(&ip, index)?;
@@ -1237,14 +1503,32 @@ pub fn import(env: &Env, src: PathBuf) -> Result<Out> {
         if key.contains("..") || key.starts_with('/') {
             fail!(Usage, "export contains an unsafe key {key:?}");
         }
+        check_imported_story(key, v)?;
         if let Some(existing) = ws.store.get_raw(key)? {
             let existing: Value = if existing.is_empty() {
                 Value::Null
             } else {
                 serde_json::from_slice(&existing).unwrap_or(Value::Null)
             };
-            if &existing != v && !key.starts_with("proposals/") {
+            if &existing == v {
+                continue;
+            }
+            if !key.starts_with("proposals/") {
                 fail!(StoreConflict, "{key} already exists with different content");
+            }
+            // A proposal takes the imported state only when that is a legal
+            // move from its state here: a decided proposal never changes.
+            let here: LinkProposal = serde_json::from_value(existing)
+                .map_err(|e| err!(Internal, "corrupt {key}: {e}"))?;
+            let there: LinkProposal = serde_json::from_value(v.clone())
+                .map_err(|e| err!(Usage, "export holds an invalid proposal {key}: {e}"))?;
+            if here.status != ProposalStatus::Open && here.status != there.status {
+                fail!(
+                    StoreConflict,
+                    "{key} is {} here and {} in the import; import never changes a decided proposal",
+                    here.status.as_str(),
+                    there.status.as_str()
+                );
             }
         }
     }
@@ -1269,6 +1553,44 @@ pub fn import(env: &Env, src: PathBuf) -> Result<Out> {
     ))
 }
 
+/// A story in an export must follow the story rules and sit under its own
+/// id and version: `stories/<id>.json` or `stories/<id>/v<N>.json`.
+fn check_imported_story(key: &str, v: &Value) -> Result<()> {
+    let Some(rest) = key.strip_prefix("stories/") else {
+        return Ok(());
+    };
+    let (id, version) = match rest.split_once('/') {
+        Some((id, file)) => {
+            let n = file
+                .strip_prefix('v')
+                .and_then(|f| f.strip_suffix(".json"))
+                .and_then(|n| n.parse::<u32>().ok())
+                .ok_or_else(|| err!(Usage, "export contains an unexpected key {key:?}"))?;
+            (id, Some(n))
+        }
+        None => (rest.strip_suffix(".json").unwrap_or(rest), None),
+    };
+    let s: Story = serde_json::from_value(v.clone())
+        .map_err(|e| err!(Usage, "export holds an invalid story {key}: {e}"))?;
+    if s.story_id != id {
+        fail!(Usage, "{key} holds story {}", s.story_id);
+    }
+    if let Some(n) = version
+        && s.version != n
+    {
+        fail!(Usage, "{key} holds version {} of {id}", s.version);
+    }
+    let violations = s.violations();
+    if !violations.is_empty() {
+        fail!(
+            Usage,
+            "export holds an invalid story {key}: {}",
+            violations.join("; ")
+        );
+    }
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // status, gc
 
@@ -1281,10 +1603,11 @@ pub fn status(env: &Env) -> Result<Out> {
     for wu in WorkUnit::all(&ws)? {
         let drafts = wu.drafts()?.len();
         let events = wu.events()?.len();
-        let expires_at = wu.meta.created_at + expiry;
-        if wu.meta.landed.is_empty() && now > expires_at - 7 * 86_400_000 {
+        let state = wu.meta.state();
+        let expires_at = wu.meta.expires_at(expiry);
+        if state != collect::State::Landed && now > expires_at - 7 * 86_400_000 {
             warnings.push(format!(
-                "work unit {} has not landed; its drafts expire {}",
+                "work unit {} has work that has not landed; it expires {}",
                 wu.meta.work_unit,
                 if now >= expires_at {
                     "now (run `git story gc`)".to_owned()
@@ -1293,7 +1616,7 @@ pub fn status(env: &Env) -> Result<Out> {
                 }
             ));
         }
-        units.push(json!({"work_unit": wu.meta.work_unit, "events": events, "drafts": drafts, "landed": wu.meta.landed, "created_at": wu.meta.created_at, "expires_at": expires_at}));
+        units.push(json!({"work_unit": wu.meta.work_unit, "state": state, "events": events, "drafts": drafts, "landed": wu.meta.landings(), "created_at": wu.meta.created_at, "last_activity": wu.meta.last_activity(), "expires_at": expires_at}));
     }
     let (endpoint, local) = model::endpoint(&ws.cfg.model);
     let trusted = local || config::trusted(&endpoint)?;
@@ -1355,29 +1678,48 @@ pub fn gc(env: &Env, dry_run: bool) -> Result<Out> {
     let now = id::now_ms();
     let expiry = ws.cfg.draft_expiry_ms();
     let mut removed = Vec::new();
+    let mut warnings = Vec::new();
     for wu in WorkUnit::all(&ws)? {
-        // Landed: the store keeps what the story cites; the rest goes.
-        // Never landed: drafts expire.
-        let done = wu.meta.landed_at.is_some_and(|t| now - t > 86_400_000);
-        let expired = wu.meta.landed.is_empty() && now >= wu.meta.created_at + expiry;
-        if done || expired {
-            removed.push(wu.meta.work_unit.clone());
+        // Landed and idle: the store keeps what the story cites; the rest
+        // goes. Unlanded work expires from its last activity.
+        if now >= wu.meta.expires_at(expiry) {
             if !dry_run {
+                // A manifest records data that may have left this machine:
+                // it goes to the store first, or the work unit stays.
+                if let Err(f) = wu.upload_egress(&ws.store) {
+                    warnings.push(format!(
+                        "kept work unit {}: its egress manifests could not be uploaded ({})",
+                        wu.meta.work_unit, f.message
+                    ));
+                    continue;
+                }
+                // Its traces need no protection once its collection is gone.
+                if !wu.meta.ghf_holds.is_empty() {
+                    crate::ghf::release(&Ctx::new(&ws, &wu.meta.work_unit), &wu);
+                }
+                let name = wu.meta.work_unit.clone();
                 wu.remove()?;
+                removed.push(name);
+            } else {
+                removed.push(wu.meta.work_unit.clone());
             }
         }
     }
+    let mut human = if removed.is_empty() {
+        "nothing to collect".to_owned()
+    } else {
+        format!(
+            "{} {}",
+            if dry_run { "would remove" } else { "removed" },
+            removed.join(", ")
+        )
+    };
+    for w in &warnings {
+        human.push_str(&format!("\nwarning: {w}"));
+    }
     Ok(Out::new(
-        json!({"dry_run": dry_run, "removed": removed}),
-        if removed.is_empty() {
-            "nothing to collect".to_owned()
-        } else {
-            format!(
-                "{} {}",
-                if dry_run { "would remove" } else { "removed" },
-                removed.join(", ")
-            )
-        },
+        json!({"dry_run": dry_run, "removed": removed, "warnings": warnings}),
+        human,
     ))
 }
 

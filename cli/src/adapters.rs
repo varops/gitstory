@@ -11,7 +11,7 @@ use gitstory_proto::evidence::{Durable, EventType, EvidenceEvent, External, Sour
 use gitstory_proto::id;
 use serde_json::Value;
 
-use crate::collect::WorkUnit;
+use crate::collect::{Scope, WorkUnit};
 use crate::error::Result;
 use crate::scrub;
 use crate::workspace::Workspace;
@@ -168,12 +168,11 @@ pub fn test_note(ctx: &Ctx, command: &str, passed: bool) -> EvidenceEvent {
 // Git
 
 /// Commits made in the work unit (and reverts), plus uncommitted changes.
-pub fn git(ctx: &Ctx, wu: &WorkUnit) -> Result<Vec<EvidenceEvent>> {
+pub fn git(ctx: &Ctx, wu: &WorkUnit, scope: &Scope) -> Result<Vec<EvidenceEvent>> {
     let repo = &ctx.ws.repo;
     // Follow the work unit's branch while it exists, so commits that reached
     // the current branch from elsewhere are not attributed to this work.
-    let tip = wu
-        .meta
+    let tip = scope
         .tip
         .clone()
         .or_else(|| {
@@ -186,7 +185,7 @@ pub fn git(ctx: &Ctx, wu: &WorkUnit) -> Result<Vec<EvidenceEvent>> {
     let Some(head) = tip else {
         return Ok(Vec::new());
     };
-    let commits = match &wu.meta.base_rev {
+    let commits = match &scope.base {
         Some(base) if base != &head => repo.commits_between(base, &head)?,
         Some(_) => Vec::new(),
         None => repo.recent_commits(20)?.into_iter().rev().collect(),
@@ -413,7 +412,7 @@ fn parse_time(ts: Option<&str>) -> i64 {
 
 /// Extract events from Claude Code session logs for this repository. Lines
 /// already read (per `wu.meta.offsets`) are skipped; offsets are advanced.
-pub fn claude_code(ctx: &Ctx, wu: &mut WorkUnit) -> Result<Vec<EvidenceEvent>> {
+pub fn claude_code(ctx: &Ctx, wu: &mut WorkUnit, scope: &Scope) -> Result<Vec<EvidenceEvent>> {
     let mut out = Vec::new();
     let Some(dir) = claude_project_dir(&ctx.ws.repo.root) else {
         return Ok(out);
@@ -450,7 +449,7 @@ pub fn claude_code(ctx: &Ctx, wu: &mut WorkUnit) -> Result<Vec<EvidenceEvent>> {
             }
             // Stay inside the work unit: its branch, and after it started.
             let at = parse_time(d.get("timestamp").and_then(Value::as_str));
-            let inside = match wu.meta.window {
+            let inside = match scope.window {
                 Some((start, end)) => at >= start && at <= end,
                 None => at >= wu.meta.created_at - 6 * 3_600_000,
             };

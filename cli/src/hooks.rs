@@ -185,8 +185,8 @@ fn git(repo: &Repo, action: &str) -> Result<(PathBuf, bool, bool)> {
             changed = true;
         }
         "uninstall" if before => {
-            let new = text.replace(&line, "");
-            if new.trim() == "#!/bin/sh" {
+            let new = without_marked(&text);
+            if new.trim() == "#!/bin/sh" || new.trim().is_empty() {
                 fs::remove_file(&path)?;
             } else {
                 fs::write(&path, new)?;
@@ -197,4 +197,35 @@ fn git(repo: &Repo, action: &str) -> Result<(PathBuf, bool, bool)> {
     }
     let installed = fs::read_to_string(&path).is_ok_and(|t| t.contains(GIT_MARKER));
     Ok((path, changed, installed))
+}
+
+/// The hook text without GitStory's lines: each marker line, and the line
+/// after it when that line runs `git story`, however it was edited since.
+fn without_marked(text: &str) -> String {
+    let mut out = String::new();
+    let mut lines = text.lines().peekable();
+    while let Some(l) = lines.next() {
+        if l.trim() == GIT_MARKER {
+            if lines.peek().is_some_and(|n| n.contains("git story")) {
+                lines.next();
+            }
+            continue;
+        }
+        out.push_str(l);
+        out.push('\n');
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn removes_marked_lines_only() {
+        let text = format!("#!/bin/sh\necho a\n{GIT_MARKER}\ngit story draft || true\necho b\n");
+        assert_eq!(without_marked(&text), "#!/bin/sh\necho a\necho b\n");
+        let lone = format!("#!/bin/sh\n{GIT_MARKER}\necho b\n");
+        assert_eq!(without_marked(&lone), "#!/bin/sh\necho b\n");
+    }
 }

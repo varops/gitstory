@@ -9,7 +9,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use gitstory_proto::evidence::{EventType, EvidenceEvent};
 use gitstory_proto::id;
-use gitstory_proto::record::HunkRef;
+use gitstory_proto::record::{HunkRef, Purpose};
 use gitstory_proto::story::{
     Claim, ClaimStatus, ClaimType, Review, STORY_SCHEMA, Stage, Story, StoryStatus,
 };
@@ -165,7 +165,7 @@ pub(crate) fn gated_bundle(
     (
         json!({"events": evs, "diff": files}),
         Sent {
-            purpose: "",
+            purpose: Purpose::Synthesis,
             event_ids: ids,
             hunks,
             excerpts,
@@ -347,9 +347,9 @@ pub fn synthesize(
     let landing = input.stage == Stage::Landed && !input.drafts.is_empty();
     let (bundle, mut sent) = gated_bundle(cfg, input.events, input.diff, ignored);
     sent.purpose = if landing {
-        "reconciliation"
+        Purpose::Reconciliation
     } else {
-        "synthesis"
+        Purpose::Synthesis
     };
     let mut user = json!({
         "work_unit": input.work_unit,
@@ -426,9 +426,7 @@ pub fn synthesize(
             unknowns: strings(&v["unknowns"]),
             paths: strings(&v["paths"]),
             links: Default::default(),
-            review: Review {
-                status: "unreviewed".into(),
-            },
+            review: Review::default(),
             egress: String::new(),
         };
         if story.summary.is_empty() {
@@ -500,8 +498,33 @@ fn test_check(c: &Claim, by_id: &HashMap<&str, &EvidenceEvent>) -> Option<bool> 
     Some(true)
 }
 
+/// The checker's ruling on one claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Verdict {
+    /// The evidence alone supports the claim as written.
+    Yes,
+    /// Plausible, but not established: not judged either way.
+    Partly,
+    /// Unsupported or contradicted.
+    No,
+}
+
+impl Verdict {
+    /// Read a model's verdict, ignoring case and surrounding space. Anything
+    /// unrecognized is `Partly`, like a missing verdict: a provider that does
+    /// not enforce the schema never gets a claim through by accident.
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "yes" => Self::Yes,
+            "no" => Self::No,
+            _ => Self::Partly,
+        }
+    }
+}
+
 /// A claim the repair step rewrote so its evidence supports it.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct Repair {
     pub from: String,
     pub to: String,
@@ -512,8 +535,8 @@ pub struct Repair {
 #[derive(Debug, Clone)]
 pub struct Judged {
     pub claim: String,
-    /// `yes`, `partly` or `no`, after the mechanical test check.
-    pub verdict: &'static str,
+    /// After the mechanical test check.
+    pub verdict: Verdict,
     pub note: String,
 }
 
@@ -592,8 +615,8 @@ fn judge(
     cited: &BTreeSet<String>,
     diff: &[FileDiff],
     ignored: &dyn Fn(&str) -> bool,
-    purpose: &'static str,
-) -> Result<Vec<(&'static str, String)>> {
+    purpose: Purpose,
+) -> Result<Vec<(Verdict, String)>> {
     let excerpts = cfg.egress.send_excerpts && cfg.collection.excerpts == "on";
     // The commit's diff is durable too: it lives in Git. It is what proves
     // claims about what the code does, for claims that cite an edit.
@@ -626,7 +649,7 @@ fn judge(
 /// it names: models swap indexes (a "no" for one claim landing on its
 /// neighbor). A verdict whose text matches no claim is ignored, and a claim
 /// that gets two different verdicts is not judged; both stay "partly".
-fn match_verdicts(claims: &[ToCheck], v: &Value) -> Vec<(&'static str, String)> {
+fn match_verdicts(claims: &[ToCheck], v: &Value) -> Vec<(Verdict, String)> {
     let norm = |t: &str| {
         t.split_whitespace()
             .collect::<Vec<_>>()
@@ -635,7 +658,7 @@ fn match_verdicts(claims: &[ToCheck], v: &Value) -> Vec<(&'static str, String)> 
             .to_lowercase()
     };
     let keys: Vec<String> = claims.iter().map(|c| norm(&c.text)).collect();
-    let mut seen: Vec<Option<(&'static str, String)>> = vec![None; claims.len()];
+    let mut seen: Vec<Option<(Verdict, String)>> = vec![None; claims.len()];
     let mut conflict = vec![false; claims.len()];
     for item in v["verdicts"].as_array().cloned().unwrap_or_default() {
         let (Some(text), Some(sup)) = (item["claim"].as_str(), item["supported"].as_str()) else {
@@ -652,11 +675,7 @@ fn match_verdicts(claims: &[ToCheck], v: &Value) -> Vec<(&'static str, String)> 
         else {
             continue;
         };
-        let sup = match sup {
-            "no" => "no",
-            "partly" => "partly",
-            _ => "yes",
-        };
+        let sup = Verdict::parse(sup);
         let note = item["note"].as_str().unwrap_or_default().to_owned();
         match &seen[i] {
             Some((prev, _)) if *prev != sup => conflict[i] = true,
@@ -668,7 +687,7 @@ fn match_verdicts(claims: &[ToCheck], v: &Value) -> Vec<(&'static str, String)> 
         .zip(conflict)
         .map(|(s, c)| match s {
             Some(v) if !c => v,
-            _ => ("partly", String::new()),
+            _ => (Verdict::Partly, String::new()),
         })
         .collect()
 }
@@ -732,17 +751,25 @@ pub fn validate_logged(
     // mechanical checks below. With one, a claim it does not rule on is not
     // supported (see `judge`).
     let has_model = !items.is_empty() && cfg.validation_model().provider != "none";
-    let mut verdict: Vec<(&str, String)> = if has_model {
-        judge(cfg, gate, &claims, &cited, diff, ignored, "validation")?
+    let mut verdict: Vec<(Verdict, String)> = if has_model {
+        judge(
+            cfg,
+            gate,
+            &claims,
+            &cited,
+            diff,
+            ignored,
+            Purpose::Validation,
+        )?
     } else {
-        vec![("yes", String::new()); items.len()]
+        vec![(Verdict::Yes, String::new()); items.len()]
     };
     // Counts that disagree with the test facts sink the claim. Counts that
     // agree prove only the counts: the rest of the claim ("including new
     // tests for UTC-5") still needs the model's yes.
     for (i, (si, ci)) in items.iter().enumerate() {
         if test_check(&sections[*si][*ci], &by_id) == Some(false) {
-            verdict[i].0 = "no";
+            verdict[i].0 = Verdict::No;
         }
     }
 
@@ -751,7 +778,7 @@ pub fn validate_logged(
         .zip(&verdict)
         .map(|(c, (v, note))| Judged {
             claim: c.text.clone(),
-            verdict: v,
+            verdict: *v,
             note: note.clone(),
         })
         .collect();
@@ -761,7 +788,7 @@ pub fn validate_logged(
     // sticks to the evidence, then judge the rewrite like any other claim.
     let mut repairs = Vec::new();
     let partly: Vec<usize> = (0..items.len())
-        .filter(|i| verdict[*i].0 == "partly")
+        .filter(|i| verdict[*i].0 == Verdict::Partly)
         .collect();
     if has_model && !partly.is_empty() {
         let any_diff = partly.iter().any(|i| claims[*i].diff_applies);
@@ -782,7 +809,7 @@ pub fn validate_logged(
             max_tokens: 8_000,
         };
         let sent = Sent {
-            purpose: "repair",
+            purpose: Purpose::Repair,
             event_ids: cited.iter().cloned().collect(),
             hunks: gated.hunks,
             excerpts,
@@ -811,20 +838,28 @@ pub fn validate_logged(
                     ..claims[*i].clone()
                 })
                 .collect();
-            let second = judge(cfg, gate, &again, &cited, diff, ignored, "revalidation")?;
+            let second = judge(
+                cfg,
+                gate,
+                &again,
+                &cited,
+                diff,
+                ignored,
+                Purpose::Revalidation,
+            )?;
             for ((i, text), (sup, _)) in rewrites.into_iter().zip(second) {
                 let (si, ci) = items[i];
                 let rewritten = Claim {
                     claim: text.clone(),
                     ..sections[si][ci].clone()
                 };
-                if sup == "yes" && test_check(&rewritten, &by_id) != Some(false) {
+                if sup == Verdict::Yes && test_check(&rewritten, &by_id) != Some(false) {
                     repairs.push(Repair {
                         from: claims[i].text.clone(),
                         to: text,
                     });
                     sections[si][ci] = rewritten;
-                    verdict[i].0 = "yes";
+                    verdict[i].0 = Verdict::Yes;
                 }
             }
         }
@@ -837,10 +872,10 @@ pub fn validate_logged(
     for i in order {
         let (si, ci) = items[i];
         match verdict[i].0 {
-            "no" => {
+            Verdict::No => {
                 sections[si].remove(ci);
             }
-            "partly" => {
+            Verdict::Partly => {
                 let c = sections[si].remove(ci);
                 moved.push(Claim {
                     kind: ClaimType::Inferred,
@@ -848,7 +883,7 @@ pub fn validate_logged(
                     ..c
                 });
             }
-            _ => {}
+            Verdict::Yes => {}
         }
     }
     s.hypotheses.extend(moved);
@@ -951,8 +986,8 @@ mod tests {
             {"index": 1, "claim": "The suite passed 50 of 50 runs.", "supported": "yes", "note": "50/50"}
         ]});
         let out = match_verdicts(&claims, &v);
-        assert_eq!(out[0], ("yes", "50/50".to_owned()));
-        assert_eq!(out[1], ("no", "30s, not 60s".to_owned()));
+        assert_eq!(out[0], (Verdict::Yes, "50/50".to_owned()));
+        assert_eq!(out[1], (Verdict::No, "30s, not 60s".to_owned()));
     }
 
     #[test]
@@ -964,8 +999,17 @@ mod tests {
             {"index": 1, "claim": "B", "supported": "no", "note": ""}
         ]});
         let out = match_verdicts(&claims, &v);
-        assert_eq!(out[0].0, "partly");
-        assert_eq!(out[1].0, "partly");
+        assert_eq!(out[0].0, Verdict::Partly);
+        assert_eq!(out[1].0, Verdict::Partly);
+    }
+
+    #[test]
+    fn verdicts_parse_case_insensitively_and_fail_closed() {
+        assert_eq!(Verdict::parse(" YES "), Verdict::Yes);
+        assert_eq!(Verdict::parse("No"), Verdict::No);
+        assert_eq!(Verdict::parse("partly"), Verdict::Partly);
+        assert_eq!(Verdict::parse("probably"), Verdict::Partly);
+        assert_eq!(Verdict::parse(""), Verdict::Partly);
     }
 
     #[test]
@@ -1035,9 +1079,7 @@ mod tests {
             unknowns: vec![],
             paths: vec![],
             links: Default::default(),
-            review: Review {
-                status: "unreviewed".into(),
-            },
+            review: Review::default(),
             egress: "e".into(),
         };
         let landed: BTreeSet<String> = ["lock.rs".to_string()].into();

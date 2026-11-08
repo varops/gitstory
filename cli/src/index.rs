@@ -44,9 +44,10 @@ pub struct Index {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LinkGraph {
-    /// (from, to) pairs currently in force.
-    pub supersedes: BTreeMap<(String, String), ()>,
-    pub related: BTreeMap<(String, String), ()>,
+    /// (from, to) pairs currently in force, with the proposal the entry
+    /// that added them accepted, if any.
+    pub supersedes: BTreeMap<(String, String), Option<String>>,
+    pub related: BTreeMap<(String, String), Option<String>>,
 }
 
 /// Replay the append-only link log into the links currently in force.
@@ -59,7 +60,7 @@ pub fn link_graph(store: &Store) -> Result<LinkGraph> {
         };
         match l.op {
             LinkOp::Add => {
-                map.insert((l.from, l.to), ());
+                map.insert((l.from, l.to), l.proposal);
             }
             LinkOp::Remove => {
                 map.remove(&(l.from, l.to));
@@ -168,25 +169,24 @@ impl Index {
         Ok(())
     }
 
-    /// A story with link-derived fields filled in: status, supersedes, related.
-    fn hydrate(&self, mut s: Story) -> Story {
+    /// A story as commands show it: `status`, `supersedes` and `related`
+    /// come from the link log only, never from the stored copy, so removing
+    /// a link always takes effect.
+    pub fn view(&self, mut s: Story) -> Story {
         s.status = if self.superseded_by.contains_key(&s.story_id) {
             StoryStatus::Superseded
         } else {
             StoryStatus::Current
         };
-        let mut sup = s.supersedes.clone();
-        sup.extend(
-            self.supersedes
-                .get(&s.story_id)
-                .cloned()
-                .unwrap_or_default(),
-        );
+        let mut sup = self
+            .supersedes
+            .get(&s.story_id)
+            .cloned()
+            .unwrap_or_default();
         sup.sort();
         sup.dedup();
         s.supersedes = sup;
-        let mut rel = s.related.clone();
-        rel.extend(self.related.get(&s.story_id).cloned().unwrap_or_default());
+        let mut rel = self.related.get(&s.story_id).cloned().unwrap_or_default();
         rel.sort();
         rel.dedup();
         s.related = rel;
@@ -199,7 +199,7 @@ impl Index {
         let mut out = Vec::new();
         for j in rows {
             let s: Story = serde_json::from_str(&j?)?;
-            out.push(self.hydrate(s));
+            out.push(self.view(s));
         }
         Ok(out)
     }
@@ -258,7 +258,7 @@ impl Index {
         let rows = st.query_map(params![q, limit as i64], |r| r.get::<_, String>(0))?;
         let mut out = Vec::new();
         for j in rows {
-            out.push(self.hydrate(serde_json::from_str(&j?)?));
+            out.push(self.view(serde_json::from_str(&j?)?));
         }
         Ok(out)
     }

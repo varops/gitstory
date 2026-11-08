@@ -41,3 +41,18 @@ fn every_command_is_documented() {
         assert!(heading, "docs/cli.md has no heading for `{c}`");
     }
 }
+
+#[test]
+fn every_egress_purpose_is_documented() {
+    let manifest = DOC
+        .lines()
+        .find(|l| l.starts_with("An **egress manifest**"))
+        .expect("docs/cli.md describes the egress manifest");
+    for p in gitstory_proto::record::Purpose::ALL {
+        assert!(
+            manifest.contains(&format!("`{}`", p.as_str())),
+            "docs/cli.md: egress purpose `{}` is not documented",
+            p.as_str()
+        );
+    }
+}

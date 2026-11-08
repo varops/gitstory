@@ -9,10 +9,12 @@ use gitstory_proto::evidence::{EventType, EvidenceEvent, SourceType};
 use serde_json::Value;
 
 use crate::adapters::Ctx;
-use crate::collect::WorkUnit;
+use crate::collect::{Scope, WorkUnit};
 use crate::error::Result;
 
 const HOLD: &str = "gitstory";
+/// Renew a hold older than this (holds are placed for 30 days).
+const RENEW_MS: i64 = 7 * 86_400_000;
 
 /// `$GITSTORY_GHF`, else `git hf`.
 fn command(ctx: &Ctx) -> Command {
@@ -40,17 +42,28 @@ fn ghf(ctx: &Ctx, args: &[&str]) -> Option<Value> {
 }
 
 /// Checkpoints of this worktree's traces, from the work unit's base onward,
-/// as attempt, test and abandon events. Holds each trace it reads.
-pub fn traces(ctx: &Ctx, wu: &mut WorkUnit) -> Result<Vec<EvidenceEvent>> {
+/// as attempt, test and abandon events. Holds each trace it reads. Returns
+/// the events and the traces it placed or renewed a hold on, for the caller
+/// to record in the work unit's meta.
+pub fn traces(
+    ctx: &Ctx,
+    wu: &WorkUnit,
+    scope: &Scope,
+) -> Result<(Vec<EvidenceEvent>, Vec<String>)> {
+    let mut held = Vec::new();
+    let now = gitstory_proto::id::now_ms();
     if !ctx.ws.repo.common_dir.join("ghf").is_dir() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), held));
     }
     let Some(list) = ghf(ctx, &["trace", "list"]) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), held));
     };
     // Commits in scope: the base and everything after it.
     let mut revs: HashSet<String> = HashSet::new();
-    if let (Some(base), Some(head)) = (&wu.meta.base_rev, ctx.ws.repo.head()) {
+    if let (Some(base), Some(head)) = (
+        &scope.base,
+        scope.tip.clone().or_else(|| ctx.ws.repo.head()),
+    ) {
         revs.insert(base.clone());
         revs.extend(ctx.ws.repo.commits_between(base, &head).unwrap_or_default());
     }
@@ -130,22 +143,34 @@ pub fn traces(ctx: &Ctx, wu: &mut WorkUnit) -> Result<Vec<EvidenceEvent>> {
                 Vec::new(),
             ));
         }
-        if !wu.meta.ghf_holds.iter().any(|h| h == tid)
+        // Holds expire after 30 days; renew one older than a week so a
+        // long-running work unit never loses its trace.
+        let due = wu
+            .meta
+            .ghf_holds
+            .iter()
+            .find(|h| h.id == tid)
+            .is_none_or(|h| now - h.at > RENEW_MS);
+        if due
             && ghf(
                 ctx,
                 &["trace", "hold", tid, "--name", HOLD, "--expires", "30d"],
             )
             .is_some()
         {
-            wu.meta.ghf_holds.push(tid.to_owned());
+            held.push(tid.to_owned());
         }
     }
-    Ok(out)
+    Ok((out, held))
 }
 
-/// Release the holds once the work unit's evidence is in the store.
-pub fn release(ctx: &Ctx, wu: &mut WorkUnit) {
+/// Release the work unit's holds: once its evidence is in the store, or
+/// when gc removes it. Returns the traces released.
+pub fn release(ctx: &Ctx, wu: &WorkUnit) -> Vec<String> {
     wu.meta
         .ghf_holds
-        .retain(|tid| ghf(ctx, &["trace", "release", tid, "--name", HOLD]).is_none());
+        .iter()
+        .filter(|h| ghf(ctx, &["trace", "release", &h.id, "--name", HOLD]).is_some())
+        .map(|h| h.id.clone())
+        .collect()
 }

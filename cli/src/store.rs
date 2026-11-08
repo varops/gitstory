@@ -12,7 +12,8 @@
 //! | `commits/<sha>/<story-id>` | Commit to story association (empty object) |
 //!
 //! Every object is written whole and never edited in place except proposal
-//! status, so the same layout works on plain object storage.
+//! status, so the same layout works on plain object storage. Story versions
+//! are written create-only, so concurrent edits cannot replace each other.
 
 use std::fs;
 use std::io::Write;
@@ -30,6 +31,9 @@ use crate::{err, fail};
 pub trait Backend {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
     fn put(&self, key: &str, data: &[u8]) -> Result<()>;
+    /// Write `key` only if it does not exist yet; `E_STORE_CONFLICT` if it
+    /// does.
+    fn put_new(&self, key: &str, data: &[u8]) -> Result<()>;
     /// Keys under `prefix`, sorted.
     fn list(&self, prefix: &str) -> Result<Vec<String>>;
     fn describe(&self) -> String;
@@ -61,6 +65,42 @@ impl Backend for LocalBackend {
         Ok(())
     }
 
+    /// Create-only and still atomic: the complete temp file is hard-linked
+    /// into place, which fails if the key exists. Without hard links,
+    /// falls back to creating the file with `create_new`.
+    fn put_new(&self, key: &str, data: &[u8]) -> Result<()> {
+        let path = self.root.join(key);
+        let dir = path.parent().expect("key has a parent");
+        fs::create_dir_all(dir).context(|| format!("create {}", dir.display()))?;
+        let exists = || err!(StoreConflict, "{key} already exists");
+        let tmp = dir.join(format!(".tmp-{}", gitstory_proto::id::random_hex(6)));
+        let mut f = fs::File::create(&tmp).context(|| format!("write {key}"))?;
+        f.write_all(data)?;
+        f.sync_all()?;
+        let linked = fs::hard_link(&tmp, &path);
+        let _ = fs::remove_file(&tmp);
+        match linked {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Err(exists()),
+            Err(_) => {
+                let mut f = match fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                {
+                    Ok(f) => f,
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                        return Err(exists());
+                    }
+                    Err(e) => return Err(e).context(|| format!("write {key}")),
+                };
+                f.write_all(data)?;
+                f.sync_all()?;
+                Ok(())
+            }
+        }
+    }
+
     fn list(&self, prefix: &str) -> Result<Vec<String>> {
         let base = self.root.join(prefix);
         let mut out = Vec::new();
@@ -90,6 +130,24 @@ impl Backend for LocalBackend {
 
     fn describe(&self) -> String {
         self.root.display().to_string()
+    }
+}
+
+/// The `at` of a new link log entry (unix ms). Strictly increasing within
+/// one process, so an Add and a Remove written in the same millisecond
+/// replay in the order they were made. Entries from different machines
+/// order by their clocks.
+pub fn link_time() -> i64 {
+    use std::sync::atomic::{AtomicI64, Ordering};
+    static LAST: AtomicI64 = AtomicI64::new(0);
+    let now = gitstory_proto::id::now_ms();
+    let mut last = LAST.load(Ordering::SeqCst);
+    loop {
+        let next = now.max(last + 1);
+        match LAST.compare_exchange(last, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return next,
+            Err(seen) => last = seen,
+        }
     }
 }
 
@@ -146,7 +204,23 @@ impl Store {
                 violations.join("; ")
             );
         }
-        self.put_json(&format!("stories/{}/v{}.json", s.story_id, s.version), s)?;
+        // A version is written once: two concurrent edits of the same story
+        // both make the same vN, and the second must not replace the first.
+        let mut data = serde_json::to_vec_pretty(s)?;
+        data.push(b'\n');
+        let key = self.key(&format!("stories/{}/v{}.json", s.story_id, s.version));
+        self.backend.put_new(&key, &data).map_err(|f| {
+            if f.code == gitstory_proto::ErrorCode::StoreConflict {
+                err!(
+                    StoreConflict,
+                    "version {} of {} was written by someone else meanwhile; run the command again",
+                    s.version,
+                    s.story_id
+                )
+            } else {
+                f
+            }
+        })?;
         self.put_json(&format!("stories/{}.json", s.story_id), s)?;
         for c in std::iter::once(&s.commit).chain(&s.contains) {
             self.backend
@@ -204,6 +278,10 @@ impl Store {
 
     pub fn put_egress(&self, m: &EgressManifest) -> Result<()> {
         self.put_json(&format!("egress/{}.json", m.id), m)
+    }
+
+    pub fn egress(&self, id: &str) -> Result<Option<EgressManifest>> {
+        self.get_json(&format!("egress/{id}.json"))
     }
 
     // -- links, proposals ---------------------------------------------------------
@@ -287,6 +365,40 @@ mod tests {
         assert_eq!(store.story_ids().unwrap(), vec!["st_1"]);
         assert_eq!(store.stories_for_commit("abc").unwrap(), vec!["st_1"]);
         assert_eq!(store.commits().unwrap(), vec!["abc"]);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// An Add and a Remove written in the same millisecond replay in order.
+    #[test]
+    fn link_log_keeps_order_within_one_process() {
+        use gitstory_proto::record::{LinkKind, LinkOp};
+        let dir =
+            std::env::temp_dir().join(format!("gs-links-{}", gitstory_proto::id::random_hex(4)));
+        let store = Store {
+            backend: Box::new(LocalBackend { root: dir.clone() }),
+            repo: "a/b".into(),
+        };
+        for op in [LinkOp::Add, LinkOp::Remove].repeat(50) {
+            store
+                .append_link(&LinkEntry {
+                    op,
+                    kind: LinkKind::Supersedes,
+                    from: "st_b".into(),
+                    to: "st_a".into(),
+                    at: link_time(),
+                    author: "t".into(),
+                    proposal: None,
+                })
+                .unwrap();
+        }
+        let ats: Vec<i64> = store.links().unwrap().iter().map(|l| l.at).collect();
+        assert!(ats.windows(2).all(|w| w[0] < w[1]), "{ats:?}");
+        assert!(
+            crate::index::link_graph(&store)
+                .unwrap()
+                .supersedes
+                .is_empty()
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 }

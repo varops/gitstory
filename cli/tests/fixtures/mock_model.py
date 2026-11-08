@@ -43,12 +43,23 @@ if "verdicts" in req["schema"]["properties"]:
     for c in user["claims"]:
         text = c["claim"]
         sup = "no" if "UNSUPPORTED" in text else "partly" if "MAYBE" in text else "yes"
+        if os.environ.get("MOCK_VERDICTS") == "upper":
+            # A provider that ignores the schema's casing.
+            sup = sup.upper()
+        elif os.environ.get("MOCK_VERDICTS") == "odd":
+            # A provider that ignores the schema's enum altogether.
+            sup = "probably"
         out.append({"index": c["index"], "claim": text, "supported": sup, "note": ""})
     if os.environ.get("MOCK_VERDICTS") == "swap" and len(out) > 1:
         # A model that mixes up indexes but echoes the right claims.
         out[0]["index"], out[1]["index"] = out[1]["index"], out[0]["index"]
     print(json.dumps({"verdicts": out}))
     sys.exit(0)
+
+if os.environ.get("MOCK_SLEEP"):
+    # A slow synthesis, so another command can run meanwhile.
+    import time
+    time.sleep(float(os.environ["MOCK_SLEEP"]))
 
 events = user.get("events", [])
 landed = {f["path"] for f in user.get("diff", [])}

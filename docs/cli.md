@@ -47,7 +47,7 @@ With `--json`, every command prints exactly one JSON object on stdout:
 | `E_NO_EVIDENCE` | 3 | The work unit has no evidence yet |
 | `E_EGRESS_DENIED` | 3 | The egress policy forbids the request; nothing was sent |
 | `E_LINK_CYCLE` | 3 | The link would create a supersession cycle |
-| `E_STORE_CONFLICT` | 4 | An import would overwrite different data |
+| `E_STORE_CONFLICT` | 4 | An import would overwrite different data, or another writer saved the same story version first; run the command again |
 | `E_UNTRUSTED_ENDPOINT` | 5 | The model endpoint is not trusted on this machine |
 | `E_AUTH` | 5 | Missing or rejected credentials |
 | `E_REMOTE` | 5 | The model or a remote store failed |
@@ -79,8 +79,9 @@ A **story** (`gitstory/v1`) is the unit everything returns:
 ```
 
 - `contains` lists the commits a merge brought in. Blame on any of them finds the story.
-- `status` comes from accepted links only, never from a guess.
+- `status`, `supersedes` and `related` come from the link log only, never from a guess or from the stored copy of the story. Removing a link (`link --remove`) always takes effect, including a link that came from `note --supersedes`. Every command that returns a story, including `land`, `edit` and `export`, shows it this way.
 - Every claim outside `hypotheses` cites evidence and is `observed` or `stated`. Inferred claims appear only in `hypotheses`.
+- A claim's `status` matches its section: `implemented` in `decisions`, `rejected` in `rejected`, `discarded` in `discarded`, and none for the goal, `evidence_summary` and `hypotheses`. The store refuses a story that breaks this, and so does `import`.
 
 An **evidence event** has a durable part that is stored with the story, and an optional external pointer that may stop resolving:
 
@@ -95,21 +96,21 @@ An **evidence event** has a durable part that is stored with the story, and an o
  "external": {"pointer": "claude-code:<session>#L42"}, "paths": ["src/lock.rs"]}
 ```
 
-An **egress manifest** (`egr_…`) lists each model call: `purpose` (`synthesis`, `reconciliation` or `validation`), `provider`, `endpoint`, `model`, `local`, `at`, the `event_ids` sent, the diff `hunks` sent (path and hash), whether `excerpts` were sent, and the request size in `bytes`. A call is recorded before it is sent, so a failed call still appears.
+An **egress manifest** (`egr_…`) lists each model call: `purpose` (`synthesis`, `reconciliation`, `validation`, `repair`, `revalidation` or `study_baseline`), `provider`, `endpoint`, `model`, `local`, `at`, the `event_ids` sent, the diff `hunks` sent (path and hash), whether `excerpts` were sent, and the request size in `bytes`. A call is recorded before it is sent, so a failed call still appears. `repair` rewrites partly supported claims and `revalidation` checks the rewrites; `study_baseline` is the M0 study's control arm.
 
-A **link proposal** (`lp_…`) has `kind` (`supersedes` or `related`), `from`, `to`, `reason` and `status` (`open`, `accepted` or `rejected`).
+A **link proposal** (`lp_…`) has `kind` (`supersedes` or `related`), `from`, `to`, `reason` and `status`: `open`, `accepted`, `rejected` or `withdrawn`. The only moves are `open` to `accepted` or `rejected`, and `accepted` to `withdrawn` (its link was removed). `accepted`, `rejected` and `withdrawn` are final.
 
 ## Commands
 
 ### `init [--repository OWNER/NAME] [--trust] [--force]`
 
-Writes `.gitstory` with the defaults below and opens the store. The repository id defaults to the `origin` remote, then `local/<directory>`. `--trust` trusts the configured model endpoint. An existing file is kept unless `--force` is given.
+Writes `.gitstory` with the defaults below and opens the store. The repository id defaults to the `origin` remote, then `local/<directory>`. `--trust` trusts every configured non-local endpoint, the validation model's included, like `trust` does. An existing file is kept unless `--force` is given.
 
 Data: `{path, created, repository, store, model{provider, name, endpoint, local, trusted}, egress}`.
 
 ### `trust [ENDPOINT]`
 
-Trusts an endpoint, or every configured non-local endpoint, to receive evidence from this machine. Trust lives in the user config directory, never in the repository. Data: `{trusted[]}`.
+Trusts an endpoint, or every configured non-local endpoint, to receive evidence from this machine. Trust lives in the user config directory, never in the repository. A trailing `/` does not matter: `https://host/v1/` and `https://host/v1` are the same endpoint, and `trusted[]` lists them without it. Data: `{trusted[]}`.
 
 ### `[REV]` · `show [REV]`
 
@@ -122,19 +123,23 @@ Records a note as stated evidence in the work unit. `--supersedes` marks the sto
 
 ### `draft [--work-unit W] [--background]`
 
-Collects evidence from Git, Claude Code session logs and ghf (when enabled), builds a draft against `HEAD` and validates it. Drafts and their egress manifests stay in the local collection. `--background` returns at once and drafts in a detached process; output goes to `.git/story/draft.log`.
+Collects evidence from Git, Claude Code session logs and ghf (when enabled), builds a draft against `HEAD` and validates it. Each ghf trace it reads gets a `gitstory` hold for 30 days, renewed by any collection once it is older than a week, and released when the work unit lands or `gc` removes it. Drafts and their egress manifests stay in the local collection until the work unit lands; the next successful landing uploads every manifest kept there (drafts and failed landings) to the store. `--background` returns at once and drafts in a detached process; output goes to `.git/story/draft.log`.
 
 Data: `{story, work_unit, new_events, events, egress}`.
 
 ### `land [--work-unit W] [--to REV] [--since REV]`
 
-Run after the work merges. `--to` (default `HEAD`) must be reachable from the main branch. Landing collects the evidence once more and reconciles the drafts against the landed diff. A claim the landed code does not reflect becomes `rejected` or `discarded`. Landing then validates the story and writes it to the store, with the cited events and the egress manifest. Notes with `--supersedes` become links. Blame on the lines the commit changed proposes further links.
+Run after the work merges. `--to` (default `HEAD`) must be reachable from the main branch. Landing collects the evidence once more and reconciles the drafts against the landed diff. A claim the landed code does not reflect becomes `rejected` or `discarded`. Landing then validates the story and writes it to the store, with the cited events and the egress manifest. Notes with `--supersedes` become links. A link that would create a supersession cycle is skipped and listed in `skipped_links`. Blame on the lines the commit changed proposes further links.
 
-`--since REV` lands work that went straight to main as several commits: the story covers `REV..TO`, and session evidence counts only between `REV`'s commit time and ten minutes after `TO`.
+Every check that can fail runs before anything is written, and the story is written after its evidence and manifest. If a later step fails (a link, a proposal, the local record), run `land` again: when the work unit already has a story for the commit, `land` finishes the remaining steps for that story (`resumed: true`) and never writes a second one. When that landing had already finished, `land` returns its story and changes nothing: links removed since stay removed, and newer drafts and notes wait for the next landing.
+
+`--since REV` lands work that went straight to main as several commits: the story covers `REV..TO`, and session evidence counts only between `REV`'s commit time and ten minutes after `TO`. The range and the time window apply to that landing only and are never saved.
+
+A successful landing closes the work unit's round. The drafts it reconciled move to `drafts/landed/<sha>/` in the local collection, and the `--supersedes` notes it applied are cleared. After `--since`, the work unit's collection starts at `TO`. So the next landing of the same work unit (often `main`) starts fresh: it never replays earlier drafts or links. Drafts of a commit the work unit already landed are ignored.
 
 Before synthesis, session evidence is narrowed to the task behind the change. The task starts with the last request before the first session edit to a changed file, and earlier session events are dropped. This applies to `draft` too.
 
-Data: `{story, proposals[], cited_events, egress}`.
+Data: `{story, proposals[], cited_events, egress, study_sheet, resumed, skipped_links[]}`.
 
 ### `blame PATH[:START[-END]]`
 
@@ -158,11 +163,21 @@ Full-text search over summaries, claims, goals and paths. Terms are combined wit
 
 Re-checks a landed story using only durable evidence: the durable parts of the events it cites, and the commit's diff from Git. Session logs, CI links and ghf traces may be gone. Nothing is changed; any model call is recorded in a new egress manifest.
 
-Data: `{story, valid, unsupported[], missing_events[], egress}`.
+It runs the same validation as landing, repair step included. A partly supported claim that the repair step rewrote into a supported one holds, and is listed in `repairs[]` as `{from, to}`; the stored story is not changed. A claim that does not hold is listed in `unsupported[]`.
+
+The checker's verdict is read without regard to case. A verdict other than `yes`, `partly` or `no`, like a missing one, counts as not judged (`partly`), so a provider that does not enforce the response schema never gets a claim through by accident.
+
+Data: `{story, valid, unsupported[], repairs[], missing_events[], egress}`.
 
 ### `link STORY --supersedes|--related OTHER [--remove]` · `link --accept|--reject PROPOSAL`
 
-Adds or removes a link in the append-only link log, or decides a proposal. A `supersedes` link that would create a cycle is refused. Data: `{link}` or `{proposal}`.
+Adds or removes a link in the append-only link log, or decides a proposal. A `supersedes` link that would create a cycle is refused. Data: `{link, withdrawn}` or `{proposal}`.
+
+- `--accept` writes the link, then marks the proposal `accepted`. If it fails in between, run it again: a link from that proposal that is already in force is not added twice. Accepting an accepted proposal (or rejecting a rejected one) changes nothing; any other move from a final status fails with `E_USAGE`.
+- `--remove` on a link that came from an accepted proposal also marks that proposal `withdrawn`, returned in `withdrawn`.
+- Two machines deciding the same proposal at the same moment on a shared S3 store can still race: proposals are not written with conditional requests yet.
+
+The log replays in order of each entry's `at` (unix ms). Within one process `at` strictly increases, so an add and a remove made in the same millisecond keep their order. Entries written on different machines are ordered by those machines' clocks.
 
 ### `proposals`
 
@@ -170,32 +185,39 @@ Open link proposals. Data: `{proposals[]}`.
 
 ### `edit [REV|STORY] [--story S] [--summary T] [--add-decision T]... [--add-unknown T]... [--promote N]... [--demote N]... [--review reviewed|flagged|unreviewed]`
 
-Edits a landed story as a new version; earlier versions are kept. The edit itself becomes a stated `review` event, and added or promoted decisions cite it. `--promote N` turns hypothesis N (0-based) into a stated decision. `--demote N` turns decision N into a hypothesis.
+Edits a landed story as a new version; earlier versions are kept. Each version is written once (create-only, with `If-None-Match: *` on S3): if another machine saved the same version first, the edit fails with `E_STORE_CONFLICT` and changes nothing, and running it again edits the newer version. The edit itself becomes a stated `review` event, and added or promoted decisions cite it. `--promote N` turns hypothesis N (0-based) into a stated decision. `--demote N` turns decision N into a hypothesis. A content change without `--review` turns a `reviewed` story back to `unreviewed`, since the reviewed text changed; `flagged` stays until `--review` changes it.
 
 Data: `{story, event}`.
 
 ### `export [--format json|markdown] [--out DIR]`
 
-Writes `gitstory-export.json` (schema `gitstory-export/v1`): every stored object, including story versions, cited events, egress manifests, the link log and proposals. `markdown` also writes `index.md` and one page per story. Data: `{directory, files, objects}`.
+Writes `gitstory-export.json` (schema `gitstory-export/v1`). Its `objects` hold every stored object as stored, including story versions, cited events, egress manifests, the link log and proposals; `import` reads only these. Its `stories` list each current story as commands show it, with `status`, `supersedes` and `related` from the link log. `markdown` also writes `index.md` and one page per story. Data: `{directory, files, objects}`.
 
 ### `import DIR|FILE`
 
-Imports an export. Every object is checked before anything is written. An object that already exists with different content stops the import with `E_STORE_CONFLICT`, except proposals, which take the imported state. Importing the same export twice changes nothing.
+Imports an export. Every object is checked before anything is written. Each story must follow the story rules, with a known `review.status`, and sit under its own id and version (`stories/<id>.json`, `stories/<id>/v<N>.json`); otherwise the import stops with `E_USAGE`. An object that already exists with different content stops the import with `E_STORE_CONFLICT`, except an `open` proposal, which takes the imported status. A proposal that is already `accepted`, `rejected` or `withdrawn` is never changed by import: a different status in the export stops the import with `E_STORE_CONFLICT`. Importing the same export twice changes nothing.
 
 Data: `{written, unchanged, repository}`.
 
 ### `status`
 
-Store, model, egress policy and local work units, with warnings for drafts close to expiry and untrusted endpoints. Data: `{repository, store, stories, open_proposals, work_units[], model, egress, warnings[]}`.
+Store, model, egress policy and local work units, with warnings for unlanded work close to expiry and untrusted endpoints. Data: `{repository, store, stories, open_proposals, work_units[], model, egress, warnings[]}`.
+
+Each work unit is `{work_unit, state, events, drafts, landed[], created_at, last_activity, expires_at}`:
+
+- `state` is `open` (never landed), `landed` (landed, nothing new since) or `reopened` (landed, then new evidence, notes or drafts arrived).
+- `landed[]` lists every landing as `{commit, story, at}`.
+- `last_activity` is the time of the last new evidence, note or draft.
+- `expires_at` is when `gc` removes the local collection: a day after landing for a `landed` work unit, else `drafts.expire` after `last_activity`.
 
 ### `gc [--dry-run]`
 
-Removes local collection for work units that landed more than a day ago, and for work units that never landed and are past `drafts.expire`. Landed stories and their cited evidence stay in the store. Data: `{dry_run, removed[]}`.
+Removes the local collection of work units past their `expires_at` (see `status`): landed work units with nothing new for a day since they landed, and work units with unlanded work and no activity for `drafts.expire`. A work unit that got new evidence or drafts after it landed is kept like unlanded work. Landed stories and their cited evidence stay in the store. Before removing a work unit, `gc` uploads its remaining egress manifests to the store, since their data may have left the machine; if that fails, the work unit is kept and a warning says why. Data: `{dry_run, removed[], warnings[]}`.
 
 ### `hooks install|uninstall|status claude-code|git [--scope project|local|user]`
 
 - **`claude-code`** adds a `Stop` hook to `.claude/settings.json` (or `settings.local.json`, or the user settings).
-- **`git`** adds a `post-commit` hook.
+- **`git`** adds a `post-commit` hook: a marker comment and the command line after it. `uninstall` removes both by the marker, even if the command line was edited, and keeps the rest of the hook.
 
 Both run `git story draft --background --json`, so neither waits for the model. Data: `{path, changed, installed, command}`.
 
@@ -266,7 +288,7 @@ expire = "30d"
 
 Everything local lives under the Git common directory, never in refs or the object store:
 
-- `.git/story/collect/<work-unit>/`: every collected event, drafts and draft egress manifests. Never shared.
+- `.git/story/collect/<work-unit>/`: every collected event, drafts and draft egress manifests, and `meta.json` with the work unit's landings and last activity. Never shared. Drafts a landing reconciled move to `drafts/landed/<sha>/`. Every change to `meta.json` happens under `meta.lock`, a lock file held only while the meta is read, changed and written back, so a background draft and a `land` running at the same time do not undo each other's changes. A lock older than 30 seconds was left by a process that died and is taken over. The directory name is the work unit id with unsafe characters replaced by `_`, so two ids that map to the same directory (`feat/a` and `feat_a`) are refused with `E_USAGE`.
 - `.git/story/store/`: the default local store.
 - `.git/story/index.db`: the search index, rebuilt from the store when needed.
 - `.git/story/draft.log`: output of background drafts.
