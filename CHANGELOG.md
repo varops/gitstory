@@ -31,6 +31,8 @@
 
 - **Egress manifests.** The manifests of drafts and failed landings now go to the store with the next successful landing, and `gc` uploads any that are left before removing a work unit (or keeps the work unit if it cannot). Before, `gc` deleted them although their data may have left the machine. The `repair`, `revalidation` and `study_baseline` purposes are now documented.
 
+- **Claim status matches its section.** The story rules now check every section's claim status, not only decisions, and `import` applies them.
+
 ### Changed
 
 - `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.

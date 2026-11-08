@@ -81,6 +81,7 @@ A **story** (`gitstory/v1`) is the unit everything returns:
 - `contains` lists the commits a merge brought in. Blame on any of them finds the story.
 - `status`, `supersedes` and `related` come from the link log only, never from a guess or from the stored copy of the story. Removing a link (`link --remove`) always takes effect, including a link that came from `note --supersedes`. Every command that returns a story, including `land`, `edit` and `export`, shows it this way.
 - Every claim outside `hypotheses` cites evidence and is `observed` or `stated`. Inferred claims appear only in `hypotheses`.
+- A claim's `status` matches its section: `implemented` in `decisions`, `rejected` in `rejected`, `discarded` in `discarded`, and none for the goal, `evidence_summary` and `hypotheses`. The store refuses a story that breaks this, and so does `import`.
 
 An **evidence event** has a durable part that is stored with the story, and an optional external pointer that may stop resolving:
 

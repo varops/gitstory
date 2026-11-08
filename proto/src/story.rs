@@ -166,6 +166,33 @@ impl Story {
                 out.push(format!("non-inferred claim in hypotheses: {:?}", c.claim));
             }
         }
+        // Every other section's status follows from the section itself.
+        let name = |st: Option<ClaimStatus>| match st {
+            None => "none",
+            Some(ClaimStatus::Implemented) => "implemented",
+            Some(ClaimStatus::Rejected) => "rejected",
+            Some(ClaimStatus::Discarded) => "discarded",
+        };
+        for (section, list, expected) in [
+            ("goal", std::slice::from_ref(&self.goal), None),
+            ("rejected", &self.rejected[..], Some(ClaimStatus::Rejected)),
+            (
+                "discarded",
+                &self.discarded[..],
+                Some(ClaimStatus::Discarded),
+            ),
+            ("evidence_summary", &self.evidence_summary[..], None),
+            ("hypotheses", &self.hypotheses[..], None),
+        ] {
+            for c in list.iter().filter(|c| c.status != expected) {
+                out.push(format!(
+                    "status {} in {section}, expected {}: {:?}",
+                    name(c.status),
+                    name(expected),
+                    c.claim
+                ));
+            }
+        }
         out
     }
 }
@@ -233,5 +260,21 @@ mod tests {
                 .any(|x| x.starts_with("non-inferred claim in hypotheses"))
         );
         assert!(v.iter().any(|x| x.starts_with("uncited claim")));
+    }
+
+    #[test]
+    fn invariants_check_every_sections_status() {
+        let mut s: Story = serde_json::from_str(PRD_EXAMPLE).unwrap();
+        s.rejected[0].status = Some(ClaimStatus::Implemented);
+        s.evidence_summary[0].status = Some(ClaimStatus::Rejected);
+        s.hypotheses[0].status = Some(ClaimStatus::Implemented);
+        s.goal.status = Some(ClaimStatus::Discarded);
+        let v = s.violations();
+        for section in ["goal", "rejected", "evidence_summary", "hypotheses"] {
+            assert!(
+                v.iter().any(|x| x.contains(&format!("in {section}"))),
+                "{section}: {v:?}"
+            );
+        }
     }
 }

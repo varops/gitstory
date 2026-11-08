@@ -956,3 +956,38 @@ fn gc_keeps_manifests_until_uploaded() {
     assert_eq!(gc["removed"], json!(["feat/a"]), "{gc}");
     assert!(manifest_ids(&egress).contains(&id));
 }
+
+// ---------------------------------------------------------------------------
+// 10. Claim status matches its section
+
+/// Import refuses a story whose claims carry the wrong status for their
+/// section.
+#[test]
+fn import_refuses_a_claim_status_that_contradicts_its_section() {
+    let r = Repo::new("claim-status");
+    let id = land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    let out = r.base.join("export");
+    r.ok(&["export", "--out", out.to_str().unwrap()]);
+    let path = out.join("gitstory-export.json");
+    let mut bundle: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for key in [
+        format!("stories/{id}.json"),
+        format!("stories/{id}/v1.json"),
+    ] {
+        let h = &mut bundle["objects"][&key]["hypotheses"][0];
+        assert!(h.is_object(), "the story has a hypothesis");
+        h["status"] = json!("implemented");
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+    let other = Repo::new("claim-status-b");
+    let (code, v) = other.run(&["import", out.to_str().unwrap()]);
+    assert_ne!(code, 0, "{v}");
+    assert_eq!(v["error"]["code"], "E_USAGE", "{v}");
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("hypotheses"),
+        "{v}"
+    );
+}
