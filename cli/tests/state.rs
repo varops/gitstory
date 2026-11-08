@@ -526,3 +526,121 @@ fn edit_and_export_show_the_derived_status() {
         "superseded"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 4. Link proposals and the link log
+
+/// A and B both rewrite line 1 of lock.txt: landing B proposes B supersedes A.
+fn proposal_scenario(r: &Repo) -> (String, String, String) {
+    r.write("lock.txt", "x\nkeep\n");
+    r.commit_all("lock file");
+    let edit = |branch: &str, line: &str, note: &str| {
+        r.git(&["checkout", "-qb", branch]);
+        r.write("lock.txt", &format!("{line}\nkeep\n"));
+        r.ok(&["note", note]);
+        r.commit_all(&format!("{branch} change"));
+        r.git(&["checkout", "-q", "main"]);
+        r.git(&[
+            "merge",
+            "-q",
+            "--no-ff",
+            branch,
+            "-m",
+            &format!("Merge {branch}"),
+        ]);
+        r.ok(&["land", "--work-unit", branch, "--to", "HEAD"])
+    };
+    let a = edit(
+        "feat/a",
+        "lock = redis",
+        "Add a Redis lock because retries double-charge",
+    );
+    let a = a["story"]["story_id"].as_str().unwrap().to_owned();
+    let landed = edit(
+        "feat/b",
+        "lock = none",
+        "Remove the lock because versioning replaces it",
+    );
+    let b = landed["story"]["story_id"].as_str().unwrap().to_owned();
+    let p = landed["proposals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["to"] == a.as_str())
+        .expect("B supersedes A proposed")["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (a, b, p)
+}
+
+fn proposal_status(r: &Repo, pid: &str) -> Value {
+    let p: Value = serde_json::from_slice(
+        &fs::read(store_dir(r).join("proposals").join(format!("{pid}.json"))).unwrap(),
+    )
+    .unwrap();
+    p["status"].clone()
+}
+
+/// An accept that appended its link but failed before saving the proposal
+/// does not append a second link when run again.
+#[test]
+fn accepting_after_a_partial_failure_adds_no_second_link() {
+    let r = Repo::new("accept-twice");
+    let (a, b, pid) = proposal_scenario(&r);
+    // What the failed accept left behind: the link, proposal still open.
+    let at = now_ms();
+    let entry = json!({"op": "add", "kind": "supersedes", "from": b, "to": a,
+                       "at": at, "author": "Dev", "proposal": pid});
+    fs::create_dir_all(store_dir(&r).join("links")).unwrap();
+    fs::write(
+        store_dir(&r)
+            .join("links")
+            .join(format!("{at:015}-dead.json")),
+        serde_json::to_vec_pretty(&entry).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(proposal_status(&r, &pid), "open");
+    r.ok(&["link", "--accept", &pid]);
+    assert_eq!(proposal_status(&r, &pid), "accepted");
+    let n = link_log(&r)
+        .iter()
+        .filter(|l| l["proposal"] == pid.as_str())
+        .count();
+    assert_eq!(n, 1, "a second link was appended");
+    // Accepting an accepted proposal again changes nothing.
+    r.ok(&["link", "--accept", &pid]);
+    assert_eq!(link_log(&r).len(), 1);
+}
+
+/// Import never moves a decided proposal back to open.
+#[test]
+fn import_does_not_reopen_a_decided_proposal() {
+    let r = Repo::new("import-proposal");
+    let (_, _, pid) = proposal_scenario(&r);
+    let out = r.base.join("export");
+    r.ok(&["export", "--out", out.to_str().unwrap()]);
+    r.ok(&["link", "--accept", &pid]);
+    let (code, v) = r.run(&["import", out.to_str().unwrap()]);
+    assert_ne!(code, 0, "{v}");
+    assert_eq!(v["error"]["code"], "E_STORE_CONFLICT", "{v}");
+    assert_eq!(proposal_status(&r, &pid), "accepted");
+    assert!(
+        r.ok(&["proposals"])["proposals"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+/// Removing the link an accepted proposal created withdraws the proposal.
+#[test]
+fn removing_an_accepted_link_withdraws_its_proposal() {
+    let r = Repo::new("withdraw");
+    let (a, b, pid) = proposal_scenario(&r);
+    r.ok(&["link", "--accept", &pid]);
+    r.ok(&["link", &b, "--supersedes", &a, "--remove"]);
+    assert_eq!(proposal_status(&r, &pid), "withdrawn");
+    assert_eq!(r.ok(&["show", &a])["stories"][0]["status"], "current");
+    assert_eq!(r.err(&["link", "--accept", &pid]), "E_USAGE");
+}

@@ -97,7 +97,7 @@ An **evidence event** has a durable part that is stored with the story, and an o
 
 An **egress manifest** (`egr_…`) lists each model call: `purpose` (`synthesis`, `reconciliation` or `validation`), `provider`, `endpoint`, `model`, `local`, `at`, the `event_ids` sent, the diff `hunks` sent (path and hash), whether `excerpts` were sent, and the request size in `bytes`. A call is recorded before it is sent, so a failed call still appears.
 
-A **link proposal** (`lp_…`) has `kind` (`supersedes` or `related`), `from`, `to`, `reason` and `status` (`open`, `accepted` or `rejected`).
+A **link proposal** (`lp_…`) has `kind` (`supersedes` or `related`), `from`, `to`, `reason` and `status`: `open`, `accepted`, `rejected` or `withdrawn`. The only moves are `open` to `accepted` or `rejected`, and `accepted` to `withdrawn` (its link was removed). `accepted`, `rejected` and `withdrawn` are final.
 
 ## Commands
 
@@ -166,7 +166,11 @@ Data: `{story, valid, unsupported[], missing_events[], egress}`.
 
 ### `link STORY --supersedes|--related OTHER [--remove]` · `link --accept|--reject PROPOSAL`
 
-Adds or removes a link in the append-only link log, or decides a proposal. A `supersedes` link that would create a cycle is refused. Data: `{link}` or `{proposal}`.
+Adds or removes a link in the append-only link log, or decides a proposal. A `supersedes` link that would create a cycle is refused. Data: `{link, withdrawn}` or `{proposal}`.
+
+- `--accept` writes the link, then marks the proposal `accepted`. If it fails in between, run it again: a link from that proposal that is already in force is not added twice. Accepting an accepted proposal (or rejecting a rejected one) changes nothing; any other move from a final status fails with `E_USAGE`.
+- `--remove` on a link that came from an accepted proposal also marks that proposal `withdrawn`, returned in `withdrawn`.
+- Two machines deciding the same proposal at the same moment on a shared S3 store can still race: proposals are not written with conditional requests yet.
 
 The log replays in order of each entry's `at` (unix ms). Within one process `at` strictly increases, so an add and a remove made in the same millisecond keep their order. Entries written on different machines are ordered by those machines' clocks.
 
@@ -186,7 +190,7 @@ Writes `gitstory-export.json` (schema `gitstory-export/v1`). Its `objects` hold 
 
 ### `import DIR|FILE`
 
-Imports an export. Every object is checked before anything is written. An object that already exists with different content stops the import with `E_STORE_CONFLICT`, except proposals, which take the imported state. Importing the same export twice changes nothing.
+Imports an export. Every object is checked before anything is written. An object that already exists with different content stops the import with `E_STORE_CONFLICT`, except an `open` proposal, which takes the imported status. A proposal that is already `accepted`, `rejected` or `withdrawn` is never changed by import: a different status in the export stops the import with `E_STORE_CONFLICT`. Importing the same export twice changes nothing.
 
 Data: `{written, unchanged, repository}`.
 

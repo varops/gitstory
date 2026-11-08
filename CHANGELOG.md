@@ -17,10 +17,13 @@
 - **Story status and links come from the link log only.** `link --remove` now undoes a `supersedes` link that came from `note --supersedes`. `edit --json` and `land --json` show the derived `status`, `supersedes` and `related`, not the stored copy (which always said `current`).
 - **Link log order.** Link entries written in the same millisecond by one process keep their order.
 
+- **Link proposals.** Accepting a proposal again after a failure no longer appends a second link. `import` no longer moves an accepted or rejected proposal back to open; it stops with `E_STORE_CONFLICT` instead. Removing the link an accepted proposal created marks the proposal `withdrawn`, a new final status.
+
 ### Changed
 
 - `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.
 - `land --json` adds `resumed` and `skipped_links`.
+- `link --json` adds `withdrawn` when removing a link withdraws its proposal. Accepting an already accepted proposal now succeeds without change instead of failing with `E_USAGE`.
 - `export` adds a `stories` list to `gitstory-export.json`: each current story as commands show it. `objects` is unchanged, and bundles without `stories` still import.
 
 ## 0.0.1 — 2026-11-04

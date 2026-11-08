@@ -44,9 +44,10 @@ pub struct Index {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct LinkGraph {
-    /// (from, to) pairs currently in force.
-    pub supersedes: BTreeMap<(String, String), ()>,
-    pub related: BTreeMap<(String, String), ()>,
+    /// (from, to) pairs currently in force, with the proposal the entry
+    /// that added them accepted, if any.
+    pub supersedes: BTreeMap<(String, String), Option<String>>,
+    pub related: BTreeMap<(String, String), Option<String>>,
 }
 
 /// Replay the append-only link log into the links currently in force.
@@ -59,7 +60,7 @@ pub fn link_graph(store: &Store) -> Result<LinkGraph> {
         };
         match l.op {
             LinkOp::Add => {
-                map.insert((l.from, l.to), ());
+                map.insert((l.from, l.to), l.proposal);
             }
             LinkOp::Remove => {
                 map.remove(&(l.from, l.to));

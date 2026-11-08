@@ -40,9 +40,50 @@ pub enum ProposalStatus {
     Open,
     Accepted,
     Rejected,
+    /// Accepted, then its link was removed.
+    Withdrawn,
+}
+
+impl ProposalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Accepted => "accepted",
+            Self::Rejected => "rejected",
+            Self::Withdrawn => "withdrawn",
+        }
+    }
+
+    /// The legal moves: `open` to `accepted` or `rejected`, and `accepted`
+    /// to `withdrawn`. Staying put is always allowed, so a repeated command
+    /// is a no-op.
+    pub fn can_become(self, next: Self) -> bool {
+        use ProposalStatus::*;
+        self == next
+            || matches!(
+                (self, next),
+                (Open, Accepted | Rejected) | (Accepted, Withdrawn)
+            )
+    }
+
+    /// Move to `next`, or say why that move is not allowed.
+    pub fn transition(self, next: Self) -> Result<Self, String> {
+        if self.can_become(next) {
+            Ok(next)
+        } else {
+            Err(format!(
+                "a proposal that is {} cannot become {}",
+                self.as_str(),
+                next.as_str()
+            ))
+        }
+    }
 }
 
 /// A link suggested by landing reconciliation. Never applied on its own.
+///
+/// Two machines deciding the same proposal at the same time on a shared S3
+/// store can still race: the store has no conditional writes for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LinkProposal {
     pub id: String,
@@ -87,4 +128,17 @@ pub struct EgressManifest {
     pub id: String,
     #[serde(default)]
     pub calls: Vec<EgressCall>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProposalStatus::*;
+
+    #[test]
+    fn proposal_moves() {
+        assert!(Open.can_become(Accepted) && Open.can_become(Rejected));
+        assert!(Accepted.can_become(Withdrawn) && Accepted.can_become(Accepted));
+        assert!(!Accepted.can_become(Open) && !Rejected.can_become(Accepted));
+        assert!(!Withdrawn.can_become(Accepted) && !Open.can_become(Withdrawn));
+    }
 }

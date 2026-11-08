@@ -655,7 +655,7 @@ fn plan_links(ws: &Workspace, story: &Story) -> Result<(Vec<String>, Vec<String>
             skipped.push(old.clone());
             continue;
         }
-        graph.supersedes.insert(key, ());
+        graph.supersedes.insert(key, None);
         apply.push(old.clone());
     }
     Ok((apply, skipped))
@@ -1078,34 +1078,47 @@ pub fn link(
             .store
             .proposal(pid)?
             .ok_or_else(|| err!(NotFound, "no proposal {pid}"))?;
-        if p.status != ProposalStatus::Open {
-            fail!(Usage, "proposal {pid} is already {:?}", p.status);
-        }
-        if accept.is_some() {
-            let g = index::link_graph(&ws.store)?;
-            if p.kind == LinkKind::Supersedes && creates_cycle(&g, &p.from, &p.to) {
-                fail!(
-                    LinkCycle,
-                    "accepting {pid} would create a supersession cycle"
-                );
-            }
-            ws.store.append_link(&LinkEntry {
-                op: LinkOp::Add,
-                kind: p.kind,
-                from: p.from.clone(),
-                to: p.to.clone(),
-                at: crate::store::link_time(),
-                author,
-                proposal: Some(p.id.clone()),
-            })?;
-            p.status = ProposalStatus::Accepted;
+        let next = if accept.is_some() {
+            ProposalStatus::Accepted
         } else {
-            p.status = ProposalStatus::Rejected;
+            ProposalStatus::Rejected
+        };
+        p.status = p
+            .status
+            .transition(next)
+            .map_err(|e| err!(Usage, "{pid}: {e}"))?;
+        if next == ProposalStatus::Accepted {
+            let g = index::link_graph(&ws.store)?;
+            let map = match p.kind {
+                LinkKind::Supersedes => &g.supersedes,
+                LinkKind::Related => &g.related,
+            };
+            // The link is written first and the proposal second, so a retry
+            // after a failure in between finds the link and does not add it
+            // again.
+            let in_force = map.get(&(p.from.clone(), p.to.clone())) == Some(&Some(p.id.clone()));
+            if !in_force {
+                if p.kind == LinkKind::Supersedes && creates_cycle(&g, &p.from, &p.to) {
+                    fail!(
+                        LinkCycle,
+                        "accepting {pid} would create a supersession cycle"
+                    );
+                }
+                ws.store.append_link(&LinkEntry {
+                    op: LinkOp::Add,
+                    kind: p.kind,
+                    from: p.from.clone(),
+                    to: p.to.clone(),
+                    at: crate::store::link_time(),
+                    author,
+                    proposal: Some(p.id.clone()),
+                })?;
+            }
         }
         ws.store.put_proposal(&p)?;
         return Ok(Out::new(
             json!({"proposal": p}),
-            format!("proposal {} {:?}", p.id, p.status).to_lowercase(),
+            format!("proposal {} {}", p.id, p.status.as_str()),
         ));
     }
     let idx = ws.index()?;
@@ -1127,6 +1140,25 @@ pub fn link(
     {
         fail!(LinkCycle, "{from} supersedes {to} would create a cycle");
     }
+    // Removing a link an accepted proposal made withdraws the proposal. The
+    // proposal is written first: if the removal then fails, running it again
+    // still finds the link in force and its proposal.
+    let mut withdrawn = None;
+    if remove {
+        let g = index::link_graph(&ws.store)?;
+        let map = match kind {
+            LinkKind::Supersedes => &g.supersedes,
+            LinkKind::Related => &g.related,
+        };
+        if let Some(Some(pid)) = map.get(&(from.clone(), to.clone()))
+            && let Some(mut p) = ws.store.proposal(pid)?
+            && p.status.can_become(ProposalStatus::Withdrawn)
+        {
+            p.status = ProposalStatus::Withdrawn;
+            ws.store.put_proposal(&p)?;
+            withdrawn = Some(p);
+        }
+    }
     let entry = LinkEntry {
         op: if remove { LinkOp::Remove } else { LinkOp::Add },
         kind,
@@ -1138,7 +1170,7 @@ pub fn link(
     };
     ws.store.append_link(&entry)?;
     Ok(Out::new(
-        json!({"link": entry}),
+        json!({"link": entry, "withdrawn": withdrawn}),
         format!(
             "{} {from} {:?} {to}",
             if remove { "removed" } else { "linked" },
@@ -1398,8 +1430,25 @@ pub fn import(env: &Env, src: PathBuf) -> Result<Out> {
             } else {
                 serde_json::from_slice(&existing).unwrap_or(Value::Null)
             };
-            if &existing != v && !key.starts_with("proposals/") {
+            if &existing == v {
+                continue;
+            }
+            if !key.starts_with("proposals/") {
                 fail!(StoreConflict, "{key} already exists with different content");
+            }
+            // A proposal takes the imported state only when that is a legal
+            // move from its state here: a decided proposal never changes.
+            let here: LinkProposal = serde_json::from_value(existing)
+                .map_err(|e| err!(Internal, "corrupt {key}: {e}"))?;
+            let there: LinkProposal = serde_json::from_value(v.clone())
+                .map_err(|e| err!(Usage, "export holds an invalid proposal {key}: {e}"))?;
+            if here.status != ProposalStatus::Open && here.status != there.status {
+                fail!(
+                    StoreConflict,
+                    "{key} is {} here and {} in the import; import never changes a decided proposal",
+                    here.status.as_str(),
+                    there.status.as_str()
+                );
             }
         }
     }
