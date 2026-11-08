@@ -287,7 +287,7 @@ expire = "30d"
 
 Everything local lives under the Git common directory, never in refs or the object store:
 
-- `.git/story/collect/<work-unit>/`: every collected event, drafts and draft egress manifests, and `meta.json` with the work unit's landings and last activity. Never shared. Drafts a landing reconciled move to `drafts/landed/<sha>/`. The directory name is the work unit id with unsafe characters replaced by `_`, so two ids that map to the same directory (`feat/a` and `feat_a`) are refused with `E_USAGE`.
+- `.git/story/collect/<work-unit>/`: every collected event, drafts and draft egress manifests, and `meta.json` with the work unit's landings and last activity. Never shared. Drafts a landing reconciled move to `drafts/landed/<sha>/`. Every change to `meta.json` happens under `meta.lock`, a lock file held only while the meta is read, changed and written back, so a background draft and a `land` running at the same time do not undo each other's changes. A lock older than 30 seconds was left by a process that died and is taken over. The directory name is the work unit id with unsafe characters replaced by `_`, so two ids that map to the same directory (`feat/a` and `feat_a`) are refused with `E_USAGE`.
 - `.git/story/store/`: the default local store.
 - `.git/story/index.db`: the search index, rebuilt from the store when needed.
 - `.git/story/draft.log`: output of background drafts.

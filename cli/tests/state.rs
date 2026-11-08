@@ -699,3 +699,54 @@ fn validate_accepts_repaired_claims() {
         json!([{"from": "MAYBE keep a small", "to": "keep a small"}])
     );
 }
+
+// ---------------------------------------------------------------------------
+// 6. Concurrent writers on one work unit
+
+/// A note written while `land` synthesizes survives `land`'s meta update.
+#[test]
+fn meta_written_during_land_is_kept() {
+    let r = Repo::new("concurrent");
+    let a = land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    r.git(&["checkout", "-qb", "feat/b"]);
+    r.write("b.rs", "b\n");
+    r.ok(&["note", "Add b because the cache needs it"]);
+    r.commit_all("Add b");
+    r.git(&["checkout", "-q", "main"]);
+    r.git(&["merge", "-q", "--no-ff", "feat/b", "-m", "Merge feat/b"]);
+
+    let log = r.base.join("mock.log");
+    let lines = || {
+        fs::read_to_string(&log)
+            .map(|t| t.lines().count())
+            .unwrap_or(0)
+    };
+    let before = lines();
+    let child = r
+        .cmd()
+        .env("MOCK_SLEEP", "3")
+        .args(["land", "--work-unit", "feat/b", "--to", "HEAD", "--json"])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    // Wait until land is inside synthesis.
+    let t = std::time::Instant::now();
+    while lines() == before {
+        assert!(t.elapsed().as_secs() < 30, "land never reached the model");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    r.ok(&[
+        "note",
+        "Replace a with b because b is simpler",
+        "--work-unit",
+        "feat/b",
+        "--supersedes",
+        &a,
+    ]);
+    let out = child.wait_with_output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["ok"], true, "{v}");
+    let meta = read_meta(&r, "feat/b");
+    assert_eq!(meta["supersedes"], json!([a]), "the note was lost: {meta}");
+    assert_eq!(meta["landed"].as_array().unwrap().len(), 1);
+}

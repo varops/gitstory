@@ -56,6 +56,11 @@ if "verdicts" in req["schema"]["properties"]:
     print(json.dumps({"verdicts": out}))
     sys.exit(0)
 
+if os.environ.get("MOCK_SLEEP"):
+    # A slow synthesis, so another command can run meanwhile.
+    import time
+    time.sleep(float(os.environ["MOCK_SLEEP"]))
+
 events = user.get("events", [])
 landed = {f["path"] for f in user.get("diff", [])}
 

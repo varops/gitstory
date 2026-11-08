@@ -22,6 +22,8 @@
 - **Validation verdicts.** A verdict is read without regard to case, and any value other than `yes`, `partly` or `no` counts as not judged. Before, anything but `no` or `partly` counted as supported, which let claims through for providers that do not enforce the schema.
 - **`validate` and repaired claims.** A claim the repair step fixed is now valid; before, `validate` reported it as unsupported and returned `valid: false`.
 
+- **Concurrent writers on a work unit.** Changes to a work unit's meta now happen under a per-work-unit lock, and each command writes only its own change to the current copy. Before, `land` wrote back the copy it read at the start, losing read offsets, ghf holds and `--supersedes` notes that a background draft or a note wrote meanwhile.
+
 ### Changed
 
 - `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.

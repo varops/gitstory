@@ -5,7 +5,9 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use gitstory_proto::evidence::EvidenceEvent;
 use gitstory_proto::record::EgressManifest;
@@ -298,6 +300,7 @@ impl WorkUnit {
         fs::create_dir_all(dir.join("drafts"))?;
         fs::create_dir_all(dir.join("egress"))?;
         let meta_path = dir.join("meta.json");
+        let _lock = MetaLock::acquire(&dir)?;
         let meta = match fs::read(&meta_path) {
             Ok(d) => {
                 let m: WorkUnitMeta = serde_json::from_slice(&d)?;
@@ -322,7 +325,7 @@ impl WorkUnit {
                     (_, _, h) => h,
                 };
                 let m = WorkUnitMeta::new(work_unit, branch, base_rev);
-                fs::write(&meta_path, serde_json::to_vec_pretty(&m)?)?;
+                write_meta(&dir, &m)?;
                 m
             }
         };
@@ -349,17 +352,34 @@ impl WorkUnit {
         Ok(out)
     }
 
-    pub fn save_meta(&self) -> Result<()> {
-        fs::write(
-            self.dir.join("meta.json"),
-            serde_json::to_vec_pretty(&self.meta)?,
-        )?;
-        Ok(())
+    /// Change the meta under the work unit's lock: read the copy on disk,
+    /// apply `f`, write it back. Every meta writer goes through here and
+    /// states only its own change, so a long command (`land`) never
+    /// overwrites what another process (a background draft, a note) wrote
+    /// meanwhile.
+    pub fn update<T>(&mut self, f: impl FnOnce(&mut WorkUnitMeta) -> Result<T>) -> Result<T> {
+        let _lock = MetaLock::acquire(&self.dir)?;
+        let mut m: WorkUnitMeta = match fs::read(self.dir.join("meta.json")) {
+            Ok(d) => serde_json::from_slice(&d)?,
+            Err(_) => self.meta.clone(),
+        };
+        let out = f(&mut m)?;
+        write_meta(&self.dir, &m)?;
+        self.meta = m;
+        Ok(out)
+    }
+
+    /// Record activity now (new evidence, a note, a draft).
+    pub fn touch(&mut self) -> Result<()> {
+        self.update(|m| {
+            m.touch(gitstory_proto::id::now_ms());
+            Ok(())
+        })
     }
 
     /// Add events, skipping any whose source span was already recorded.
     /// Returns how many were new.
-    pub fn add_events(&mut self, events: &[EvidenceEvent]) -> Result<usize> {
+    pub fn add_events(&self, events: &[EvidenceEvent]) -> Result<usize> {
         let known: std::collections::HashSet<String> = self
             .events()?
             .into_iter()
@@ -375,9 +395,6 @@ impl WorkUnit {
                 serde_json::to_vec_pretty(e)?,
             )?;
             n += 1;
-        }
-        if n > 0 {
-            self.meta.touch(gitstory_proto::id::now_ms());
         }
         Ok(n)
     }
@@ -395,12 +412,11 @@ impl WorkUnit {
         Ok(out)
     }
 
-    pub fn put_draft(&mut self, s: &Story) -> Result<()> {
+    pub fn put_draft(&self, s: &Story) -> Result<()> {
         fs::write(
             self.dir.join("drafts").join(format!("{}.json", s.story_id)),
             serde_json::to_vec_pretty(s)?,
         )?;
-        self.meta.touch(gitstory_proto::id::now_ms());
         Ok(())
     }
 
@@ -438,17 +454,74 @@ impl WorkUnit {
         Ok(())
     }
 
-    pub fn put_egress(&mut self, m: &EgressManifest) -> Result<()> {
+    pub fn put_egress(&self, m: &EgressManifest) -> Result<()> {
         fs::write(
             self.dir.join("egress").join(format!("{}.json", m.id)),
             serde_json::to_vec_pretty(m)?,
         )?;
-        self.meta.touch(gitstory_proto::id::now_ms());
         Ok(())
     }
 
     pub fn remove(self) -> Result<()> {
         fs::remove_dir_all(&self.dir)?;
         Ok(())
+    }
+}
+
+/// Write meta atomically (temp file, rename), so readers without the lock
+/// (`status`, `gc`) never see half a file.
+fn write_meta(dir: &Path, m: &WorkUnitMeta) -> Result<()> {
+    let tmp = dir.join(format!(".meta-{}.tmp", gitstory_proto::id::random_hex(4)));
+    fs::write(&tmp, serde_json::to_vec_pretty(m)?)
+        .context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, dir.join("meta.json")).context(|| format!("write {}", dir.display()))?;
+    Ok(())
+}
+
+/// An exclusive lock on one work unit's meta: a `meta.lock` file created
+/// with `create_new`, removed on drop. It is held only around a read,
+/// change and write of `meta.json`, never across a model call, so a lock
+/// older than [`MetaLock::STALE`] was left by a process that died and is
+/// taken over.
+struct MetaLock {
+    path: PathBuf,
+}
+
+impl MetaLock {
+    const STALE: Duration = Duration::from_secs(30);
+
+    fn acquire(dir: &Path) -> Result<Self> {
+        let path = dir.join("meta.lock");
+        loop {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut f) => {
+                    let _ = write!(f, "{}", std::process::id());
+                    return Ok(Self { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let stale = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age > Self::STALE);
+                    if stale {
+                        let _ = fs::remove_file(&path);
+                    } else {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                }
+                Err(e) => return Err(e).context(|| format!("lock {}", path.display())),
+            }
+        }
+    }
+}
+
+impl Drop for MetaLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }

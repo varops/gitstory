@@ -221,16 +221,20 @@ pub fn note(
             "give the note text, or --test <cmd> --result pass|fail"
         ),
     };
-    if let Some(sid) = &supersedes {
-        let idx = ws.index()?;
-        let full = resolve_story(&idx, sid)?;
-        if !wu.meta.supersedes.contains(&full) {
-            wu.meta.supersedes.push(full);
-        }
-    }
+    let full = match &supersedes {
+        Some(sid) => Some(resolve_story(&ws.index()?, sid)?),
+        None => None,
+    };
     wu.add_events(std::slice::from_ref(&ev))?;
-    wu.meta.touch(id::now_ms());
-    wu.save_meta()?;
+    wu.update(|m| {
+        if let Some(full) = full
+            && !m.supersedes.contains(&full)
+        {
+            m.supersedes.push(full);
+        }
+        m.touch(id::now_ms());
+        Ok(())
+    })?;
     Ok(Out::new(
         json!({"work_unit": wu_id, "event": ev, "supersedes": wu.meta.supersedes}),
         format!("noted {} in work unit {wu_id}", ev.id),
@@ -246,11 +250,30 @@ fn gather(ws: &Workspace, wu: &mut WorkUnit, scope: &Scope) -> Result<usize> {
     if ws.cfg.collection.claude_code {
         events.extend(adapters::claude_code(&ctx, wu, scope)?);
     }
+    let mut held = Vec::new();
     if ws.cfg.collection.ghf {
-        events.extend(crate::ghf::traces(&ctx, wu, scope)?);
+        let (ev, h) = crate::ghf::traces(&ctx, wu, scope)?;
+        events.extend(ev);
+        held = h;
     }
     let n = wu.add_events(&events)?;
-    wu.save_meta()?;
+    // Offsets only grow, so the furthest read wins.
+    let offsets = wu.meta.offsets.clone();
+    wu.update(|m| {
+        for (file, n) in offsets {
+            let o = m.offsets.entry(file).or_insert(0);
+            *o = (*o).max(n);
+        }
+        for h in held {
+            if !m.ghf_holds.contains(&h) {
+                m.ghf_holds.push(h);
+            }
+        }
+        if n > 0 {
+            m.touch(id::now_ms());
+        }
+        Ok(())
+    })?;
     Ok(n)
 }
 
@@ -308,11 +331,11 @@ pub fn draft(env: &Env, work_unit: Option<String>, background: bool) -> Result<O
         calls: gate.calls,
     };
     wu.put_egress(&manifest)?;
-    wu.save_meta()?;
+    wu.touch()?;
     let mut story = result?;
     story.egress = egress_id;
     wu.put_draft(&story)?;
-    wu.save_meta()?;
+    wu.touch()?;
     Ok(Out::new(
         json!({"story": story_view(env, &story), "work_unit": wu_id, "new_events": new, "events": events.len(), "egress": manifest}),
         render::markdown(&story),
@@ -526,7 +549,7 @@ pub fn land(
         Err(f) => {
             // Data may have left: keep the manifest with the work unit.
             wu.put_egress(&manifest)?;
-            wu.save_meta()?;
+            wu.touch()?;
             return Err(f);
         }
     };
@@ -584,18 +607,20 @@ fn finish_landing(
     for p in proposals {
         ws.store.put_proposal(p)?;
     }
-    crate::ghf::release(&Ctx::new(ws, &story.work_unit), wu);
-    // Close the round: the next landing starts from here.
-    wu.meta
-        .record_landing(round.sha, &story.story_id, id::now_ms())?;
+    let released = crate::ghf::release(&Ctx::new(ws, &story.work_unit), wu);
     wu.consume_drafts(round.sha, round.drafts)?;
-    wu.meta
-        .supersedes
-        .retain(|s| !round.consumed_supersedes.contains(s));
-    if round.since {
-        wu.meta.base_rev = Some(round.sha.to_owned());
-    }
-    wu.save_meta()
+    // Close the round on the meta as it is now, not as it was when landing
+    // started: notes and holds added meanwhile stay.
+    wu.update(|m| {
+        m.record_landing(round.sha, &story.story_id, id::now_ms())?;
+        m.supersedes
+            .retain(|s| !round.consumed_supersedes.contains(s));
+        m.ghf_holds.retain(|h| !released.contains(h));
+        if round.since {
+            m.base_rev = Some(round.sha.to_owned());
+        }
+        Ok(())
+    })
 }
 
 fn landed_out(

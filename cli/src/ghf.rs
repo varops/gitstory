@@ -40,13 +40,20 @@ fn ghf(ctx: &Ctx, args: &[&str]) -> Option<Value> {
 }
 
 /// Checkpoints of this worktree's traces, from the work unit's base onward,
-/// as attempt, test and abandon events. Holds each trace it reads.
-pub fn traces(ctx: &Ctx, wu: &mut WorkUnit, scope: &Scope) -> Result<Vec<EvidenceEvent>> {
+/// as attempt, test and abandon events. Holds each trace it reads; returns
+/// the events and the traces it placed a hold on, for the caller to record
+/// in the work unit's meta.
+pub fn traces(
+    ctx: &Ctx,
+    wu: &WorkUnit,
+    scope: &Scope,
+) -> Result<(Vec<EvidenceEvent>, Vec<String>)> {
+    let mut held = Vec::new();
     if !ctx.ws.repo.common_dir.join("ghf").is_dir() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), held));
     }
     let Some(list) = ghf(ctx, &["trace", "list"]) else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), held));
     };
     // Commits in scope: the base and everything after it.
     let mut revs: HashSet<String> = HashSet::new();
@@ -140,15 +147,19 @@ pub fn traces(ctx: &Ctx, wu: &mut WorkUnit, scope: &Scope) -> Result<Vec<Evidenc
             )
             .is_some()
         {
-            wu.meta.ghf_holds.push(tid.to_owned());
+            held.push(tid.to_owned());
         }
     }
-    Ok(out)
+    Ok((out, held))
 }
 
 /// Release the holds once the work unit's evidence is in the store.
-pub fn release(ctx: &Ctx, wu: &mut WorkUnit) {
+/// Returns the traces released.
+pub fn release(ctx: &Ctx, wu: &WorkUnit) -> Vec<String> {
     wu.meta
         .ghf_holds
-        .retain(|tid| ghf(ctx, &["trace", "release", tid, "--name", HOLD]).is_none());
+        .iter()
+        .filter(|tid| ghf(ctx, &["trace", "release", tid, "--name", HOLD]).is_some())
+        .cloned()
+        .collect()
 }
