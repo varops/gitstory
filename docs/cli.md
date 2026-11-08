@@ -122,7 +122,7 @@ Records a note as stated evidence in the work unit. `--supersedes` marks the sto
 
 ### `draft [--work-unit W] [--background]`
 
-Collects evidence from Git, Claude Code session logs and ghf (when enabled), builds a draft against `HEAD` and validates it. Drafts and their egress manifests stay in the local collection. `--background` returns at once and drafts in a detached process; output goes to `.git/story/draft.log`.
+Collects evidence from Git, Claude Code session logs and ghf (when enabled), builds a draft against `HEAD` and validates it. Each ghf trace it reads gets a `gitstory` hold for 30 days, renewed by any collection once it is older than a week, and released when the work unit lands or `gc` removes it. Drafts and their egress manifests stay in the local collection. `--background` returns at once and drafts in a detached process; output goes to `.git/story/draft.log`.
 
 Data: `{story, work_unit, new_events, events, egress}`.
 

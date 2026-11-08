@@ -264,9 +264,11 @@ fn gather(ws: &Workspace, wu: &mut WorkUnit, scope: &Scope) -> Result<usize> {
             let o = m.offsets.entry(file).or_insert(0);
             *o = (*o).max(n);
         }
+        let now = id::now_ms();
         for h in held {
-            if !m.ghf_holds.contains(&h) {
-                m.ghf_holds.push(h);
+            match m.ghf_holds.iter_mut().find(|x| x.id == h) {
+                Some(x) => x.at = now,
+                None => m.ghf_holds.push(collect::GhfHold { id: h, at: now }),
             }
         }
         if n > 0 {
@@ -615,7 +617,7 @@ fn finish_landing(
         m.record_landing(round.sha, &story.story_id, id::now_ms())?;
         m.supersedes
             .retain(|s| !round.consumed_supersedes.contains(s));
-        m.ghf_holds.retain(|h| !released.contains(h));
+        m.ghf_holds.retain(|h| !released.contains(&h.id));
         if round.since {
             m.base_rev = Some(round.sha.to_owned());
         }
@@ -1597,6 +1599,10 @@ pub fn gc(env: &Env, dry_run: bool) -> Result<Out> {
         if now >= wu.meta.expires_at(expiry) {
             removed.push(wu.meta.work_unit.clone());
             if !dry_run {
+                // Its traces need no protection once its collection is gone.
+                if !wu.meta.ghf_holds.is_empty() {
+                    crate::ghf::release(&Ctx::new(&ws, &wu.meta.work_unit), &wu);
+                }
                 wu.remove()?;
             }
         }

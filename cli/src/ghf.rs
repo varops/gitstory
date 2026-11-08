@@ -13,6 +13,8 @@ use crate::collect::{Scope, WorkUnit};
 use crate::error::Result;
 
 const HOLD: &str = "gitstory";
+/// Renew a hold older than this (holds are placed for 30 days).
+const RENEW_MS: i64 = 7 * 86_400_000;
 
 /// `$GITSTORY_GHF`, else `git hf`.
 fn command(ctx: &Ctx) -> Command {
@@ -41,7 +43,7 @@ fn ghf(ctx: &Ctx, args: &[&str]) -> Option<Value> {
 
 /// Checkpoints of this worktree's traces, from the work unit's base onward,
 /// as attempt, test and abandon events. Holds each trace it reads; returns
-/// the events and the traces it placed a hold on, for the caller to record
+/// the events and the traces it placed or renewed a hold on, for the caller to record
 /// in the work unit's meta.
 pub fn traces(
     ctx: &Ctx,
@@ -49,6 +51,7 @@ pub fn traces(
     scope: &Scope,
 ) -> Result<(Vec<EvidenceEvent>, Vec<String>)> {
     let mut held = Vec::new();
+    let now = gitstory_proto::id::now_ms();
     if !ctx.ws.repo.common_dir.join("ghf").is_dir() {
         return Ok((Vec::new(), held));
     }
@@ -140,7 +143,15 @@ pub fn traces(
                 Vec::new(),
             ));
         }
-        if !wu.meta.ghf_holds.iter().any(|h| h == tid)
+        // Holds expire after 30 days; renew one older than a week so a
+        // long-running work unit never loses its trace.
+        let due = wu
+            .meta
+            .ghf_holds
+            .iter()
+            .find(|h| h.id == tid)
+            .is_none_or(|h| now - h.at > RENEW_MS);
+        if due
             && ghf(
                 ctx,
                 &["trace", "hold", tid, "--name", HOLD, "--expires", "30d"],
@@ -153,13 +164,13 @@ pub fn traces(
     Ok((out, held))
 }
 
-/// Release the holds once the work unit's evidence is in the store.
-/// Returns the traces released.
+/// Release the work unit's holds: once its evidence is in the store, or
+/// when gc removes it. Returns the traces released.
 pub fn release(ctx: &Ctx, wu: &WorkUnit) -> Vec<String> {
     wu.meta
         .ghf_holds
         .iter()
-        .filter(|tid| ghf(ctx, &["trace", "release", tid, "--name", HOLD]).is_some())
-        .cloned()
+        .filter(|h| ghf(ctx, &["trace", "release", &h.id, "--name", HOLD]).is_some())
+        .map(|h| h.id.clone())
         .collect()
 }

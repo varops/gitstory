@@ -750,3 +750,100 @@ fn meta_written_during_land_is_kept() {
     assert_eq!(meta["supersedes"], json!([a]), "the note was lost: {meta}");
     assert_eq!(meta["landed"].as_array().unwrap().len(), 1);
 }
+
+// ---------------------------------------------------------------------------
+// 7. ghf holds
+
+/// A fake `git hf` that logs its calls and serves one trace on `base`.
+#[cfg(unix)]
+fn fake_ghf(r: &Repo, base: &str) -> (PathBuf, PathBuf) {
+    use std::os::unix::fs::PermissionsExt;
+    fs::create_dir_all(r.root.join(".git/ghf")).unwrap();
+    let fake = r.base.join("fake-ghf");
+    let log = r.base.join("ghf.log");
+    let script = format!(
+        r#"#!/usr/bin/env python3
+import json, sys
+args = [a for a in sys.argv[1:] if a != "--json"]
+open({log:?}, "a").write(" ".join(args) + "\n")
+def ok(data): print(json.dumps({{"schema": "ghf.cli/v1", "ok": True, "data": data}}))
+if args[:2] == ["trace", "list"]:
+    ok({{"traces": [{{"id": "tr_1", "state": "open", "local": True}}]}})
+elif args[:2] == ["trace", "log"]:
+    ok({{"trace": {{"id": "tr_1"}}, "checkpoints": [
+        {{"id": "ck_1", "seq": 1, "base_rev": "{base}", "created_at": 1, "author": "claude-code:s1",
+          "message": "tried a lock", "changes": [{{"path": "lock.rs", "status": "added"}}]}}]}})
+elif args[:2] in (["trace", "hold"], ["trace", "release"]):
+    ok({{"trace": {{"id": "tr_1"}}}})
+else:
+    print(json.dumps({{"ok": False}})); sys.exit(1)
+"#
+    );
+    fs::write(&fake, script).unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    (fake, log)
+}
+
+#[cfg(unix)]
+fn count(log: &PathBuf, call: &str) -> usize {
+    fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with(call))
+        .count()
+}
+
+/// A hold older than a week is renewed, so a long-running work unit keeps
+/// its trace.
+#[cfg(unix)]
+#[test]
+fn old_ghf_holds_are_renewed() {
+    let r = Repo::new("ghf-renew");
+    let base = r.git(&["rev-parse", "HEAD"]);
+    let (fake, log) = fake_ghf(&r, &base);
+    r.git(&["checkout", "-qb", "feat/g"]);
+    r.write("lock.rs", "v\n");
+    r.ok(&["note", "Use row versioning because the lock failed"]);
+    r.commit_all("Row versioning");
+    run_env(&r, &[("GITSTORY_GHF", fake.to_str().unwrap())], &["draft"]);
+    assert_eq!(count(&log, "trace hold tr_1"), 1);
+    // Drafting again within the week does not hold again.
+    run_env(&r, &[("GITSTORY_GHF", fake.to_str().unwrap())], &["draft"]);
+    assert_eq!(count(&log, "trace hold tr_1"), 1);
+    let mut m = read_meta(&r, "feat/g");
+    for h in m["ghf_holds"].as_array_mut().unwrap() {
+        if h.is_object() {
+            h["at"] = json!(now_ms() - 8 * DAY);
+        }
+    }
+    write_meta(&r, "feat/g", &m);
+    run_env(&r, &[("GITSTORY_GHF", fake.to_str().unwrap())], &["draft"]);
+    assert_eq!(
+        count(&log, "trace hold tr_1"),
+        2,
+        "an old hold was not renewed"
+    );
+    let held_at = read_meta(&r, "feat/g")["ghf_holds"][0]["at"]
+        .as_i64()
+        .unwrap();
+    assert!(now_ms() - held_at < DAY);
+}
+
+/// gc releases the holds of the work units it removes.
+#[cfg(unix)]
+#[test]
+fn gc_releases_ghf_holds() {
+    let r = Repo::new("ghf-gc");
+    let base = r.git(&["rev-parse", "HEAD"]);
+    let (fake, log) = fake_ghf(&r, &base);
+    r.git(&["checkout", "-qb", "feat/g"]);
+    r.write("lock.rs", "v\n");
+    r.ok(&["note", "Use row versioning because the lock failed"]);
+    r.commit_all("Row versioning");
+    run_env(&r, &[("GITSTORY_GHF", fake.to_str().unwrap())], &["draft"]);
+    assert_eq!(count(&log, "trace hold tr_1"), 1);
+    backdate_activity(&r, "feat/g", 400 * DAY);
+    let gc = run_env(&r, &[("GITSTORY_GHF", fake.to_str().unwrap())], &["gc"]);
+    assert_eq!(gc["removed"], json!(["feat/g"]));
+    assert_eq!(count(&log, "trace release tr_1"), 1, "hold not released");
+}

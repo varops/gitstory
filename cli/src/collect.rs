@@ -43,6 +43,23 @@ pub enum State {
 
 const DAY_MS: i64 = 86_400_000;
 
+/// A ghf hold this work unit placed on a trace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GhfHold {
+    pub id: String,
+    /// When it was last placed or renewed (unix ms); 0 when unknown.
+    #[serde(default)]
+    pub at: i64,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum HoldOnDisk {
+    Full(GhfHold),
+    /// Written by 0.0.1: the trace id only.
+    Id(String),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(from = "MetaOnDisk")]
 pub struct WorkUnitMeta {
@@ -70,7 +87,7 @@ pub struct WorkUnitMeta {
     pub supersedes: Vec<String>,
     /// ghf traces this work unit holds against pruning until it lands.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub ghf_holds: Vec<String>,
+    pub ghf_holds: Vec<GhfHold>,
 }
 
 /// Meta as stored, including fields older versions wrote.
@@ -91,7 +108,7 @@ struct MetaOnDisk {
     #[serde(default)]
     supersedes: Vec<String>,
     #[serde(default)]
-    ghf_holds: Vec<String>,
+    ghf_holds: Vec<HoldOnDisk>,
     /// Written by 0.0.1: the time of the last landing only.
     #[serde(default)]
     landed_at: Option<i64>,
@@ -143,7 +160,15 @@ impl From<MetaOnDisk> for WorkUnitMeta {
             landed,
             last_activity,
             supersedes: d.supersedes,
-            ghf_holds: d.ghf_holds,
+            // A hold of unknown age is renewed on the next collection.
+            ghf_holds: d
+                .ghf_holds
+                .into_iter()
+                .map(|h| match h {
+                    HoldOnDisk::Full(h) => h,
+                    HoldOnDisk::Id(id) => GhfHold { id, at: 0 },
+                })
+                .collect(),
         }
     }
 }
