@@ -33,6 +33,8 @@
 
 - **Claim status matches its section.** The story rules now check every section's claim status, not only decisions, and `import` applies them.
 
+- **Review status.** It is now one of `unreviewed`, `reviewed` or `flagged`, checked when a story is read. Changing a reviewed story's content without `--review` makes it `unreviewed` again. `import` refuses an unknown review status.
+
 ### Changed
 
 - `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.

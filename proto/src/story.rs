@@ -52,10 +52,49 @@ pub enum Stage {
     Landed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Where a story is in human review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReviewStatus {
+    #[default]
+    Unreviewed,
+    Reviewed,
+    Flagged,
+}
+
+impl ReviewStatus {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "unreviewed" => Some(Self::Unreviewed),
+            "reviewed" => Some(Self::Reviewed),
+            "flagged" => Some(Self::Flagged),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Unreviewed => "unreviewed",
+            Self::Reviewed => "reviewed",
+            Self::Flagged => "flagged",
+        }
+    }
+
+    /// After an edit: an explicit review status wins; otherwise a content
+    /// change voids a review (the reviewed text is gone), while a flag
+    /// stays until someone clears it.
+    pub fn after_edit(self, review: Option<Self>, content_changed: bool) -> Self {
+        match (review, self) {
+            (Some(r), _) => r,
+            (None, Self::Reviewed) if content_changed => Self::Unreviewed,
+            (None, s) => s,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Review {
-    /// `unreviewed`, `reviewed` or `flagged`.
-    pub status: String,
+    pub status: ReviewStatus,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

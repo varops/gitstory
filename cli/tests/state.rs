@@ -991,3 +991,51 @@ fn import_refuses_a_claim_status_that_contradicts_its_section() {
         "{v}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 11. Review status
+
+/// Changing a reviewed story's content makes it unreviewed again.
+#[test]
+fn content_edit_resets_review() {
+    let r = Repo::new("review-reset");
+    let id = land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    let e = r.ok(&["edit", &id, "--review", "reviewed"]);
+    assert_eq!(e["story"]["review"]["status"], "reviewed");
+    let e = r.ok(&[
+        "edit",
+        &id,
+        "--add-unknown",
+        "Why a and not b is not recorded",
+    ]);
+    assert_eq!(e["story"]["review"]["status"], "unreviewed", "{e}");
+    // Reviewing in the same edit keeps the given status.
+    let e = r.ok(&["edit", &id, "--summary", "Add a", "--review", "reviewed"]);
+    assert_eq!(e["story"]["review"]["status"], "reviewed");
+    // A flag stays until someone clears it.
+    r.ok(&["edit", &id, "--review", "flagged"]);
+    let e = r.ok(&["edit", &id, "--summary", "Add a, again"]);
+    assert_eq!(e["story"]["review"]["status"], "flagged");
+}
+
+/// Import refuses a review status it does not know.
+#[test]
+fn import_refuses_an_unknown_review_status() {
+    let r = Repo::new("review-import");
+    let id = land_branch(&r, "feat/a", "a.rs", &["Add a because the queue needs it"]);
+    let out = r.base.join("export");
+    r.ok(&["export", "--out", out.to_str().unwrap()]);
+    let path = out.join("gitstory-export.json");
+    let mut bundle: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    for key in [
+        format!("stories/{id}.json"),
+        format!("stories/{id}/v1.json"),
+    ] {
+        bundle["objects"][&key]["review"]["status"] = json!("approved");
+    }
+    fs::write(&path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+    let other = Repo::new("review-import-b");
+    let (code, v) = other.run(&["import", out.to_str().unwrap()]);
+    assert_ne!(code, 0, "{v}");
+    assert_eq!(v["error"]["code"], "E_USAGE", "{v}");
+}

@@ -9,7 +9,9 @@ use gitstory_proto::id;
 use gitstory_proto::record::{
     EgressManifest, LinkEntry, LinkKind, LinkOp, LinkProposal, ProposalStatus,
 };
-use gitstory_proto::story::{Claim, ClaimStatus, ClaimType, Stage, Story, StoryStatus};
+use gitstory_proto::story::{
+    Claim, ClaimStatus, ClaimType, ReviewStatus, Stage, Story, StoryStatus,
+};
 use serde_json::{Value, json};
 
 use crate::adapters::{self, Ctx};
@@ -1311,12 +1313,17 @@ pub fn edit(env: &Env, a: EditArgs) -> Result<Out> {
             ..c
         });
     }
-    if let Some(r) = &a.review {
-        if !matches!(r.as_str(), "reviewed" | "flagged" | "unreviewed") {
-            fail!(Usage, "--review must be reviewed, flagged or unreviewed");
-        }
-        s.review.status = r.clone();
-        description.push(format!("review: {r}"));
+    let review = match &a.review {
+        Some(r) => Some(
+            ReviewStatus::parse(r)
+                .ok_or_else(|| err!(Usage, "--review must be reviewed, flagged or unreviewed"))?,
+        ),
+        None => None,
+    };
+    let content_changed = !description.is_empty() || !promoted.is_empty() || !new_claims.is_empty();
+    s.review.status = s.review.status.after_edit(review, content_changed);
+    if let Some(r) = review {
+        description.push(format!("review: {}", r.as_str()));
     }
     for p in &promoted {
         description.push(format!("promoted: {}", p.claim));

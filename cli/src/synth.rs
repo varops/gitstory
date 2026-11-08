@@ -426,9 +426,7 @@ pub fn synthesize(
             unknowns: strings(&v["unknowns"]),
             paths: strings(&v["paths"]),
             links: Default::default(),
-            review: Review {
-                status: "unreviewed".into(),
-            },
+            review: Review::default(),
             egress: String::new(),
         };
         if story.summary.is_empty() {
@@ -1081,9 +1079,7 @@ mod tests {
             unknowns: vec![],
             paths: vec![],
             links: Default::default(),
-            review: Review {
-                status: "unreviewed".into(),
-            },
+            review: Review::default(),
             egress: "e".into(),
         };
         let landed: BTreeSet<String> = ["lock.rs".to_string()].into();
