@@ -90,8 +90,10 @@ pub fn init(env: &Env, repository: Option<String>, trust: bool, force: bool) -> 
     };
     let store = workspace::open_store(&repo, &cfg)?;
     let (endpoint, local) = model::endpoint(&cfg.model);
-    if trust && !local {
-        config::trust(&endpoint)?;
+    if trust {
+        for e in external_endpoints(&cfg) {
+            config::trust(&e)?;
+        }
     }
     let trusted = local || config::trusted(&endpoint)?;
     let mut human = if created {
@@ -128,22 +130,28 @@ pub fn init(env: &Env, repository: Option<String>, trust: bool, force: bool) -> 
     ))
 }
 
+/// Every configured endpoint that is not on this machine: the model, and
+/// the validation model when it has one.
+fn external_endpoints(cfg: &RepoConfig) -> Vec<String> {
+    let mut v = vec![model::endpoint(&cfg.model)];
+    if let Some(m) = &cfg.validation
+        && m.provider != "none"
+    {
+        v.push(model::endpoint(m));
+    }
+    let mut out: Vec<String> = v
+        .into_iter()
+        .filter(|(_, local)| !local)
+        .map(|(e, _)| config::normalize_endpoint(&e))
+        .collect();
+    out.dedup();
+    out
+}
+
 pub fn trust(env: &Env, endpoint: Option<String>) -> Result<Out> {
     let targets = match endpoint {
-        Some(e) => vec![e],
-        None => {
-            let ws = env.ws()?;
-            let mut v = vec![model::endpoint(&ws.cfg.model)];
-            if let Some(m) = &ws.cfg.validation
-                && m.provider != "none"
-            {
-                v.push(model::endpoint(m));
-            }
-            v.into_iter()
-                .filter(|(_, local)| !local)
-                .map(|(e, _)| e)
-                .collect()
-        }
+        Some(e) => vec![config::normalize_endpoint(&e)],
+        None => external_endpoints(&env.ws()?.cfg),
     };
     for t in &targets {
         config::trust(t)?;

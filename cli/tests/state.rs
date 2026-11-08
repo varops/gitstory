@@ -1061,3 +1061,45 @@ fn git_hook_uninstall_removes_an_edited_hook() {
     assert!(!left.contains("git story"), "{left}");
     assert!(left.contains("echo committed"), "{left}");
 }
+
+// ---------------------------------------------------------------------------
+// 13. Trust
+
+fn trust_file(r: &Repo) -> String {
+    fs::read_to_string(r.base.join("config/trust.toml")).unwrap_or_default()
+}
+
+/// `https://host/v1/` and `https://host/v1` are the same endpoint.
+#[test]
+fn trust_ignores_a_trailing_slash() {
+    let r = Repo::new("trust-slash");
+    r.set_model(
+        "[model]\nprovider = \"openai\"\nname = \"m\"\nurl = \"https://models.example.com/v1/\"\n",
+    );
+    assert_eq!(r.ok(&["status"])["model"]["trusted"], false);
+    r.ok(&["trust", "https://models.example.com/v1"]);
+    assert_eq!(r.ok(&["status"])["model"]["trusted"], true);
+    // And the other way round.
+    r.set_model(
+        "[model]\nprovider = \"openai\"\nname = \"m\"\nurl = \"https://other.example.com/v1\"\n",
+    );
+    r.ok(&["trust", "https://other.example.com/v1/"]);
+    assert_eq!(r.ok(&["status"])["model"]["trusted"], true);
+}
+
+/// `init --trust` trusts the validation endpoint too, like `trust` does.
+#[test]
+fn init_trust_trusts_the_validation_endpoint() {
+    let r = Repo::new("trust-init");
+    let mut text = fs::read_to_string(r.config_path()).unwrap();
+    text.push_str(
+        "\n[validation]\nprovider = \"openai\"\nname = \"checker\"\nurl = \"https://check.example.com/v1\"\n",
+    );
+    fs::write(r.config_path(), text).unwrap();
+    r.ok(&["init", "--trust"]);
+    let trusted = trust_file(&r);
+    assert!(
+        trusted.contains("https://check.example.com/v1"),
+        "{trusted}"
+    );
+}

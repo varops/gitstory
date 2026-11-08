@@ -37,6 +37,8 @@
 
 - **Git hook uninstall.** `hooks uninstall git` removes the hook by its marker. Before, an edited hook line reported `changed: true` but stayed installed.
 
+- **Trust.** Endpoints are compared without a trailing `/`, so trusting `https://host/v1` covers a model configured as `https://host/v1/` and the other way round. `init --trust` now also trusts the validation endpoint, like `trust` does.
+
 ### Changed
 
 - `status --json`: each work unit now has `state` and `last_activity`; `landed` is a list of `{commit, story, at}` instead of `[commit, story]` pairs; `expires_at` is when `gc` will actually remove it. Work unit meta written by 0.0.1 still loads.
@@ -44,6 +46,7 @@
 - `link --json` adds `withdrawn` when removing a link withdraws its proposal. Accepting an already accepted proposal now succeeds without change instead of failing with `E_USAGE`.
 - `validate --json` adds `repairs[]`: claims that hold once reworded, as `{from, to}`.
 - `gc --json` adds `warnings[]`.
+- `trust --json` lists endpoints without a trailing `/`.
 - `export` adds a `stories` list to `gitstory-export.json`: each current story as commands show it. `objects` is unchanged, and bundles without `stories` still import.
 
 ## 0.0.1 — 2026-11-04

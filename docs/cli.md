@@ -104,13 +104,13 @@ A **link proposal** (`lp_…`) has `kind` (`supersedes` or `related`), `from`, `
 
 ### `init [--repository OWNER/NAME] [--trust] [--force]`
 
-Writes `.gitstory` with the defaults below and opens the store. The repository id defaults to the `origin` remote, then `local/<directory>`. `--trust` trusts the configured model endpoint. An existing file is kept unless `--force` is given.
+Writes `.gitstory` with the defaults below and opens the store. The repository id defaults to the `origin` remote, then `local/<directory>`. `--trust` trusts every configured non-local endpoint, the validation model's included, like `trust` does. An existing file is kept unless `--force` is given.
 
 Data: `{path, created, repository, store, model{provider, name, endpoint, local, trusted}, egress}`.
 
 ### `trust [ENDPOINT]`
 
-Trusts an endpoint, or every configured non-local endpoint, to receive evidence from this machine. Trust lives in the user config directory, never in the repository. Data: `{trusted[]}`.
+Trusts an endpoint, or every configured non-local endpoint, to receive evidence from this machine. Trust lives in the user config directory, never in the repository. A trailing `/` does not matter: `https://host/v1/` and `https://host/v1` are the same endpoint, and `trusted[]` lists them without it. Data: `{trusted[]}`.
 
 ### `[REV]` · `show [REV]`
 

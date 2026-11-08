@@ -377,6 +377,16 @@ struct TrustFile {
     endpoints: BTreeMap<String, i64>,
 }
 
+/// One spelling per endpoint: a URL without its trailing slashes.
+/// `command:` endpoints are kept as written.
+pub fn normalize_endpoint(endpoint: &str) -> String {
+    if endpoint.contains("://") {
+        endpoint.trim_end_matches('/').to_owned()
+    } else {
+        endpoint.to_owned()
+    }
+}
+
 /// Is this model endpoint trusted to receive evidence from this machine?
 pub fn trusted(endpoint: &str) -> Result<bool> {
     let path = user_dir()?.join("trust.toml");
@@ -384,7 +394,9 @@ pub fn trusted(endpoint: &str) -> Result<bool> {
         Ok(t) => toml::from_str(&t).map_err(|e| err!(Config, "invalid {}: {e}", path.display()))?,
         Err(_) => TrustFile::default(),
     };
-    Ok(f.endpoints.contains_key(endpoint))
+    let want = normalize_endpoint(endpoint);
+    // Entries written before normalization may still end in a slash.
+    Ok(f.endpoints.keys().any(|k| normalize_endpoint(k) == want))
 }
 
 pub fn trust(endpoint: &str) -> Result<()> {
@@ -394,7 +406,7 @@ pub fn trust(endpoint: &str) -> Result<()> {
         Err(_) => TrustFile::default(),
     };
     f.endpoints
-        .insert(endpoint.to_owned(), gitstory_proto::id::now_ms());
+        .insert(normalize_endpoint(endpoint), gitstory_proto::id::now_ms());
     write_private(&path, &toml::to_string(&f).expect("serializes"))
 }
 
